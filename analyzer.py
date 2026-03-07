@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""
+Earnings Script Analyzer MVP
+Based on academic research: Loughran-McDonald, Larcker-Zakolyukina, etc.
+"""
+
+import re
+import csv
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+# ============================================================
+# LOAD LOUGHRAN-MCDONALD DICTIONARY
+# ============================================================
+
+def load_lm_dictionary(path="LM_MasterDictionary.csv"):
+    """Load the Loughran-McDonald Master Dictionary"""
+    categories = {
+        'negative': set(),
+        'positive': set(),
+        'uncertainty': set(),
+        'litigious': set(),
+        'constraining': set(),
+        'modal_strong': set(),  # Modal words indicating strong certainty
+        'modal_weak': set(),    # Modal words indicating weak certainty
+    }
+    
+    with open(path, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            word = row['Word'].upper()
+            if row['Negative'] != '0':
+                categories['negative'].add(word)
+            if row['Positive'] != '0':
+                categories['positive'].add(word)
+            if row['Uncertainty'] != '0':
+                categories['uncertainty'].add(word)
+            if row['Litigious'] != '0':
+                categories['litigious'].add(word)
+            if row['Constraining'] != '0':
+                categories['constraining'].add(word)
+            # Modal column: 1 = strong, 2 = moderate, 3 = weak
+            modal = row.get('Modal', '0')
+            if modal == '1':
+                categories['modal_strong'].add(word)
+            elif modal in ('2', '3'):
+                categories['modal_weak'].add(word)
+    
+    return categories
+
+# ============================================================
+# CUSTOM PATTERN LISTS (Research-based)
+# ============================================================
+
+# Hedging language (from multiple studies)
+HEDGING_WORDS = {
+    'might', 'may', 'could', 'possibly', 'perhaps', 'potentially',
+    'somewhat', 'relatively', 'approximately', 'around', 'about',
+    'generally', 'typically', 'usually', 'sometimes', 'occasionally',
+    'likely', 'unlikely', 'probable', 'possible', 'uncertain',
+    'believe', 'think', 'feel', 'hope', 'expect', 'anticipate',
+    'estimate', 'appear', 'seem', 'suggest', 'indicate',
+}
+
+HEDGING_PHRASES = [
+    'going forward',
+    'at this time',
+    'as you know',
+    'you know',
+    'in a sense',
+    'kind of',
+    'sort of',
+    'more or less',
+    'to some extent',
+    'in some ways',
+    'challenging environment',
+    'headwinds',
+    'cautiously optimistic',
+]
+
+# Certainty/confidence language
+CERTAINTY_WORDS = {
+    'will', 'shall', 'must', 'definitely', 'certainly', 'absolutely',
+    'clearly', 'obviously', 'undoubtedly', 'confident', 'committed',
+    'guaranteed', 'assured', 'determined', 'convinced', 'sure',
+    'always', 'never', 'every', 'all', 'none',
+}
+
+# First-person pronouns (ownership)
+FIRST_PERSON_SINGULAR = {'i', "i'm", "i've", "i'll", "i'd", 'me', 'my', 'mine', 'myself'}
+FIRST_PERSON_PLURAL = {'we', "we're", "we've", "we'll", "we'd", 'us', 'our', 'ours', 'ourselves'}
+
+# Distancing language (Larcker-Zakolyukina deception markers)
+DISTANCING_PHRASES = [
+    'the company',
+    'the team',
+    'the organization', 
+    'management',
+    'the business',
+    'the firm',
+]
+
+# Deception markers (Larcker-Zakolyukina 2012)
+DECEPTION_MARKERS = [
+    'you know',
+    'as you know', 
+    'everyone knows',
+    'obviously',
+    'of course',
+    'clearly',
+    'frankly',
+    'honestly',
+    'to be honest',
+    'truthfully',
+    'the fact is',
+    'the reality is',
+]
+
+# Extreme positive (overselling - deception marker)
+EXTREME_POSITIVE = {
+    'tremendous', 'incredible', 'fantastic', 'amazing', 'extraordinary',
+    'exceptional', 'outstanding', 'remarkable', 'phenomenal', 'spectacular',
+    'unbelievable', 'unprecedented',
+}
+
+# ============================================================
+# TEXT PROCESSING
+# ============================================================
+
+def tokenize(text):
+    """Simple word tokenization"""
+    text = text.lower()
+    # Keep contractions together
+    words = re.findall(r"\b[\w']+\b", text)
+    return words
+
+def get_sentences(text):
+    """Split text into sentences"""
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+def count_syllables(word):
+    """Rough syllable count for Fog Index"""
+    word = word.lower()
+    count = 0
+    vowels = 'aeiouy'
+    if word[0] in vowels:
+        count += 1
+    for i in range(1, len(word)):
+        if word[i] in vowels and word[i-1] not in vowels:
+            count += 1
+    if word.endswith('e'):
+        count -= 1
+    if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+        count += 1
+    return max(1, count)
+
+def fog_index(text):
+    """Calculate Gunning Fog Index (readability)"""
+    words = tokenize(text)
+    sentences = get_sentences(text)
+    
+    if not words or not sentences:
+        return 0
+    
+    avg_sentence_length = len(words) / len(sentences)
+    complex_words = sum(1 for w in words if count_syllables(w) >= 3)
+    complex_word_pct = (complex_words / len(words)) * 100
+    
+    fog = 0.4 * (avg_sentence_length + complex_word_pct)
+    return round(fog, 1)
+
+# ============================================================
+# ANALYSIS FUNCTIONS
+# ============================================================
+
+def analyze_sentiment(words, lm_dict):
+    """Loughran-McDonald sentiment analysis"""
+    words_upper = [w.upper() for w in words]
+    
+    positive = sum(1 for w in words_upper if w in lm_dict['positive'])
+    negative = sum(1 for w in words_upper if w in lm_dict['negative'])
+    uncertainty = sum(1 for w in words_upper if w in lm_dict['uncertainty'])
+    litigious = sum(1 for w in words_upper if w in lm_dict['litigious'])
+    constraining = sum(1 for w in words_upper if w in lm_dict['constraining'])
+    
+    total = len(words)
+    
+    return {
+        'positive': positive,
+        'negative': negative,
+        'uncertainty': uncertainty,
+        'litigious': litigious,
+        'constraining': constraining,
+        'positive_pct': round(positive / total * 100, 2) if total else 0,
+        'negative_pct': round(negative / total * 100, 2) if total else 0,
+        'net_sentiment': round((positive - negative) / total * 100, 2) if total else 0,
+    }
+
+def analyze_hedging(text, words):
+    """Analyze hedging language"""
+    text_lower = text.lower()
+    
+    # Word-level hedging
+    hedge_words = sum(1 for w in words if w in HEDGING_WORDS)
+    
+    # Phrase-level hedging
+    hedge_phrases = sum(text_lower.count(phrase) for phrase in HEDGING_PHRASES)
+    
+    # Certainty words
+    certainty = sum(1 for w in words if w in CERTAINTY_WORDS)
+    
+    total = len(words)
+    
+    return {
+        'hedge_words': hedge_words,
+        'hedge_phrases': hedge_phrases,
+        'total_hedging': hedge_words + hedge_phrases,
+        'certainty_words': certainty,
+        'hedging_pct': round((hedge_words + hedge_phrases) / total * 100, 2) if total else 0,
+        'certainty_pct': round(certainty / total * 100, 2) if total else 0,
+        'confidence_ratio': round(certainty / (hedge_words + hedge_phrases + 1), 2),
+    }
+
+def analyze_ownership(text, words):
+    """Analyze first-person vs distancing language"""
+    text_lower = text.lower()
+    
+    first_singular = sum(1 for w in words if w in FIRST_PERSON_SINGULAR)
+    first_plural = sum(1 for w in words if w in FIRST_PERSON_PLURAL)
+    first_person_total = first_singular + first_plural
+    
+    distancing = sum(text_lower.count(phrase) for phrase in DISTANCING_PHRASES)
+    
+    total = len(words)
+    
+    return {
+        'first_person_singular': first_singular,
+        'first_person_plural': first_plural,
+        'first_person_total': first_person_total,
+        'distancing_phrases': distancing,
+        'ownership_pct': round(first_person_total / total * 100, 2) if total else 0,
+        'distancing_pct': round(distancing / total * 100, 2) if total else 0,
+        'ownership_ratio': round(first_person_total / (distancing + 1), 2),
+    }
+
+def analyze_deception_markers(text, words):
+    """Analyze Larcker-Zakolyukina deception markers"""
+    text_lower = text.lower()
+    
+    # False consensus markers
+    consensus_markers = sum(text_lower.count(phrase) for phrase in DECEPTION_MARKERS)
+    
+    # Extreme positive language
+    extreme_pos = sum(1 for w in words if w in EXTREME_POSITIVE)
+    
+    total = len(words)
+    
+    return {
+        'false_consensus_markers': consensus_markers,
+        'extreme_positive_words': extreme_pos,
+        'total_red_flags': consensus_markers + extreme_pos,
+        'red_flag_pct': round((consensus_markers + extreme_pos) / total * 100, 3) if total else 0,
+    }
+
+def find_flagged_passages(text):
+    """Find specific passages with issues"""
+    sentences = get_sentences(text)
+    flagged = []
+    
+    for sentence in sentences:
+        issues = []
+        sentence_lower = sentence.lower()
+        words = tokenize(sentence)
+        
+        # Check for hedging clusters (3+ hedging words in one sentence)
+        hedge_count = sum(1 for w in words if w in HEDGING_WORDS)
+        hedge_count += sum(1 for phrase in HEDGING_PHRASES if phrase in sentence_lower)
+        if hedge_count >= 3:
+            issues.append(f"Triple hedge detected ({hedge_count} hedging markers)")
+        
+        # Check for distancing
+        distancing = sum(1 for phrase in DISTANCING_PHRASES if phrase in sentence_lower)
+        if distancing >= 1 and not any(w in words for w in FIRST_PERSON_PLURAL):
+            issues.append("Distancing language without ownership")
+        
+        # Check for deception markers
+        deception = sum(1 for phrase in DECEPTION_MARKERS if phrase in sentence_lower)
+        if deception >= 1:
+            issues.append("False consensus/overselling marker")
+        
+        # Check for extreme positive
+        extreme = sum(1 for w in words if w in EXTREME_POSITIVE)
+        if extreme >= 2:
+            issues.append("Excessive superlatives")
+        
+        if issues:
+            flagged.append({
+                'sentence': sentence,
+                'issues': issues,
+            })
+    
+    return flagged
+
+def calculate_scores(analysis):
+    """Convert raw metrics to 0-100 scores"""
+    scores = {}
+    
+    # Sentiment score: net sentiment normalized to 0-100
+    # Typical range is -2% to +2%, so scale accordingly
+    net_sent = analysis['sentiment']['net_sentiment']
+    scores['sentiment'] = min(100, max(0, 50 + (net_sent * 25)))
+    
+    # Confidence score: based on confidence ratio
+    conf_ratio = analysis['hedging']['confidence_ratio']
+    scores['confidence'] = min(100, max(0, conf_ratio * 30 + 40))
+    
+    # Ownership score: based on ownership ratio
+    own_ratio = analysis['ownership']['ownership_ratio']
+    scores['ownership'] = min(100, max(0, own_ratio * 10 + 30))
+    
+    # Clarity score: inverse of Fog Index (12 = average, lower = clearer)
+    fog = analysis['readability']['fog_index']
+    scores['clarity'] = min(100, max(0, 100 - (fog - 8) * 5))
+    
+    # Red flag score: inverse of red flags (fewer = better)
+    red_flag_pct = analysis['deception']['red_flag_pct']
+    scores['red_flags'] = min(100, max(0, 100 - (red_flag_pct * 100)))
+    
+    # Overall score: weighted average
+    weights = {
+        'sentiment': 0.25,
+        'confidence': 0.25,
+        'ownership': 0.15,
+        'clarity': 0.15,
+        'red_flags': 0.20,
+    }
+    scores['overall'] = round(sum(scores[k] * weights[k] for k in weights), 0)
+    
+    return scores
+
+def get_grade(score):
+    """Convert score to letter grade"""
+    if score >= 90: return 'A'
+    if score >= 80: return 'B+'
+    if score >= 70: return 'B'
+    if score >= 60: return 'C+'
+    if score >= 50: return 'C'
+    if score >= 40: return 'D'
+    return 'F'
+
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
+
+def analyze_transcript(text, lm_dict):
+    """Run full analysis on a transcript"""
+    words = tokenize(text)
+    
+    analysis = {
+        'word_count': len(words),
+        'sentence_count': len(get_sentences(text)),
+        'sentiment': analyze_sentiment(words, lm_dict),
+        'hedging': analyze_hedging(text, words),
+        'ownership': analyze_ownership(text, words),
+        'deception': analyze_deception_markers(text, words),
+        'readability': {
+            'fog_index': fog_index(text),
+        },
+    }
+    
+    analysis['scores'] = calculate_scores(analysis)
+    analysis['flagged_passages'] = find_flagged_passages(text)
+    
+    return analysis
+
+def format_report(analysis):
+    """Generate a text report"""
+    scores = analysis['scores']
+    
+    report = []
+    report.append("=" * 60)
+    report.append("EARNINGS SCRIPT ANALYSIS REPORT")
+    report.append("=" * 60)
+    report.append("")
+    
+    # Overall score
+    grade = get_grade(scores['overall'])
+    report.append(f"OVERALL SCORE: {int(scores['overall'])}/100 ({grade})")
+    report.append("")
+    
+    # Score breakdown
+    report.append("DIMENSION SCORES:")
+    report.append(f"  Sentiment:   {int(scores['sentiment']):3d}/100  {'🟢' if scores['sentiment'] >= 60 else '🟡' if scores['sentiment'] >= 40 else '🔴'}")
+    report.append(f"  Confidence:  {int(scores['confidence']):3d}/100  {'🟢' if scores['confidence'] >= 60 else '🟡' if scores['confidence'] >= 40 else '🔴'}")
+    report.append(f"  Ownership:   {int(scores['ownership']):3d}/100  {'🟢' if scores['ownership'] >= 60 else '🟡' if scores['ownership'] >= 40 else '🔴'}")
+    report.append(f"  Clarity:     {int(scores['clarity']):3d}/100  {'🟢' if scores['clarity'] >= 60 else '🟡' if scores['clarity'] >= 40 else '🔴'}")
+    report.append(f"  Red Flags:   {int(scores['red_flags']):3d}/100  {'🟢' if scores['red_flags'] >= 80 else '🟡' if scores['red_flags'] >= 60 else '🔴'}")
+    report.append("")
+    
+    # Detailed metrics
+    report.append("-" * 60)
+    report.append("DETAILED METRICS")
+    report.append("-" * 60)
+    report.append("")
+    
+    report.append("SENTIMENT (Loughran-McDonald):")
+    s = analysis['sentiment']
+    report.append(f"  Positive words:    {s['positive']:4d} ({s['positive_pct']:.2f}%)")
+    report.append(f"  Negative words:    {s['negative']:4d} ({s['negative_pct']:.2f}%)")
+    report.append(f"  Net sentiment:     {s['net_sentiment']:+.2f}%")
+    report.append(f"  Uncertainty words: {s['uncertainty']:4d}")
+    report.append("")
+    
+    report.append("CONFIDENCE vs HEDGING:")
+    h = analysis['hedging']
+    report.append(f"  Hedging words:     {h['hedge_words']:4d}")
+    report.append(f"  Hedging phrases:   {h['hedge_phrases']:4d}")
+    report.append(f"  Certainty words:   {h['certainty_words']:4d}")
+    report.append(f"  Confidence ratio:  {h['confidence_ratio']:.2f} (higher = better)")
+    report.append("")
+    
+    report.append("OWNERSHIP (First-Person Language):")
+    o = analysis['ownership']
+    report.append(f"  'I/me/my':         {o['first_person_singular']:4d}")
+    report.append(f"  'We/us/our':       {o['first_person_plural']:4d}")
+    report.append(f"  Distancing:        {o['distancing_phrases']:4d}")
+    report.append(f"  Ownership ratio:   {o['ownership_ratio']:.2f} (higher = better)")
+    report.append("")
+    
+    report.append("READABILITY:")
+    report.append(f"  Fog Index:         {analysis['readability']['fog_index']:.1f} (12 = HS senior, lower = clearer)")
+    report.append("")
+    
+    report.append("RED FLAGS (Deception Markers):")
+    d = analysis['deception']
+    report.append(f"  False consensus:   {d['false_consensus_markers']:4d}")
+    report.append(f"  Extreme positive:  {d['extreme_positive_words']:4d}")
+    report.append("")
+    
+    # Flagged passages
+    if analysis['flagged_passages']:
+        report.append("-" * 60)
+        report.append("FLAGGED PASSAGES")
+        report.append("-" * 60)
+        for i, fp in enumerate(analysis['flagged_passages'][:10], 1):
+            report.append(f"\n{i}. \"{fp['sentence'][:100]}{'...' if len(fp['sentence']) > 100 else ''}\"")
+            for issue in fp['issues']:
+                report.append(f"   ⚠️  {issue}")
+    
+    report.append("")
+    report.append("=" * 60)
+    
+    return "\n".join(report)
+
+# ============================================================
+# CLI ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python analyzer.py <transcript_file>")
+        print("       cat transcript.txt | python analyzer.py -")
+        sys.exit(1)
+    
+    # Load dictionary
+    script_dir = Path(__file__).parent
+    lm_dict = load_lm_dictionary(script_dir / "LM_MasterDictionary.csv")
+    
+    # Read input
+    if sys.argv[1] == "-":
+        text = sys.stdin.read()
+    else:
+        with open(sys.argv[1], 'r') as f:
+            text = f.read()
+    
+    # Analyze
+    analysis = analyze_transcript(text, lm_dict)
+    
+    # Output
+    if "--json" in sys.argv:
+        # Remove flagged passages for JSON (too verbose)
+        analysis['flagged_passages'] = analysis['flagged_passages'][:5]
+        print(json.dumps(analysis, indent=2))
+    else:
+        print(format_report(analysis))
