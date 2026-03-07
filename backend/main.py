@@ -5,6 +5,7 @@ Integrates Claude for institutional-grade analyst Q&A.
 """
 
 from typing import Optional, List, Dict
+import asyncio
 import re
 import difflib
 import logging
@@ -148,53 +149,100 @@ def _corrected_scores(base_analysis: dict) -> dict:
 # Rewrite helpers — ensure every flagged issue gets a suggested rewrite
 # ---------------------------------------------------------------------------
 
-# Fallback rewrites for common issue types when get_suggested_rewrite() has no match
-_HEDGING_REPLACEMENTS = [
-    (r"\bmight\b", "will"),
-    (r"\bmay\b", "will"),
-    (r"\bcould\b", "can"),
-    (r"\bpossibly\b", ""),
-    (r"\bperhaps\b", ""),
-    (r"\bpotentially\b", ""),
-    (r"\bsomewhat\b", ""),
-    (r"\bgenerally\b", ""),
-    (r"\btypically\b", ""),
-    (r"\brelatively\b", ""),
-    (r"\bapproximately\b", "about"),
-    (r"\bcautiously optimistic\b", "optimistic"),
-    (r"\bgoing forward\b", "in the coming quarter"),
-    (r"\bchallenging environment\b", "competitive market"),
-    (r"\bthe company believes\b", "we believe"),
-    (r"\bwe believe\b", "we see"),
-    (r"\bwe think\b", "we expect"),
-    (r"\bwe feel\b", "we expect"),
-    (r"\bwe hope\b", "we expect"),
-]
+# ---------------------------------------------------------------------------
+# Claude-powered rewrites — context-aware, respects legal language
+# ---------------------------------------------------------------------------
+
+_REWRITE_SYSTEM_PROMPT = """You are an expert IR (Investor Relations) editor reviewing an earnings call script.
+
+Your job: Suggest targeted rewrites for flagged sentences to make management sound more confident and direct — BUT only when appropriate.
+
+CRITICAL RULES:
+1. NEVER modify safe harbor statements, forward-looking statement disclaimers, or legal boilerplate. These MUST stay exactly as written. Words like "may", "could", "might" in legal disclaimers are legally required.
+2. NEVER change cautionary risk disclosures. If management is intentionally flagging a risk or uncertainty, preserve that intent.
+3. ONLY rewrite hedging language that genuinely weakens the message without serving a legal or cautionary purpose.
+4. Preserve grammatical correctness — every rewrite must read naturally.
+5. Preserve the original meaning. Don't turn uncertain statements into definitive claims.
+6. Make minimal changes — change as few words as possible.
+7. If a sentence is fine as-is (legal language, appropriate caution, or already clear), return it UNCHANGED.
+
+EXAMPLES OF WHAT TO FIX:
+- "We are cautiously optimistic about growth" → "We are optimistic about growth"
+- "We hope to see improvement" → "We expect to see improvement" (only if context supports it)
+- Removing unnecessary filler: "somewhat", "relatively", "generally" when they add no meaning
+
+EXAMPLES OF WHAT TO LEAVE ALONE:
+- "Actual results may differ materially" — LEGAL, do not touch
+- "We may not achieve the level of adoption" — INTENTIONAL RISK DISCLOSURE
+- "Factors that could cause results to differ" — LEGAL, do not touch
+- "We believe our approach positions us well" — APPROPRIATE, "believe" is fine here
+
+Return ONLY valid JSON — no markdown, no code fences:
+{
+  "rewrites": [
+    {"index": 0, "rewrite": "The rewritten sentence or exact original if no change needed"},
+    {"index": 1, "rewrite": "..."}
+  ]
+}
+
+The "index" must match the sentence index from the input. Include ALL sentences in the output."""
 
 
-def _generate_rewrite(sentence: str, issues: list) -> str:
+async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[dict]:
     """
-    Always produce a rewrite. First try the sacred get_suggested_rewrite().
-    If that returns nothing, apply our fallback pattern-based rewrites.
+    Send all flagged sentences to Claude in one batch for context-aware rewriting.
+    Returns a dict mapping sentence text → rewrite (or same text if no change).
     """
-    # Try the sacred rewriter first
+    if not ANTHROPIC_API_KEY or not flagged_sentences:
+        return None
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        # Build the prompt with numbered sentences
+        parts = ["Here are the flagged sentences from an earnings call script. For each one, suggest a rewrite or return it unchanged:\n"]
+        for i, item in enumerate(flagged_sentences):
+            parts.append(f"[{i}] Issues: {', '.join(item['issues'])}")
+            parts.append(f"    Sentence: {item['sentence']}")
+            parts.append("")
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            system=_REWRITE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": "\n".join(parts)}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Handle potential markdown code fences
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+            response_text = re.sub(r"\s*```$", "", response_text)
+
+        data = json.loads(response_text)
+        rewrites = data.get("rewrites", [])
+
+        # Build a mapping: original sentence → rewrite
+        result = {}
+        for r in rewrites:
+            idx = r.get("index", -1)
+            if 0 <= idx < len(flagged_sentences):
+                result[flagged_sentences[idx]["sentence"]] = r.get("rewrite", flagged_sentences[idx]["sentence"])
+
+        logger.info(f"Claude generated {len(result)} rewrites")
+        return result
+
+    except Exception as e:
+        logger.error(f"Claude rewrite generation failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _generate_rewrite_fallback(sentence: str, issues: list) -> str:
+    """Simple fallback rewrite when Claude is unavailable. Returns original if no good rewrite."""
     rewrite, changes = get_suggested_rewrite(sentence)
     if rewrite and rewrite != sentence:
         return rewrite
-
-    # Fallback: apply hedging replacements
-    result = sentence
-    for pattern, replacement in _HEDGING_REPLACEMENTS:
-        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
-
-    # Clean up extra spaces
-    result = re.sub(r"\s+", " ", result).strip()
-    result = re.sub(r"\s+([.,;:!?])", r"\1", result)
-
-    if result != sentence:
-        return result
-
-    # Last resort: return original with a note
     return sentence
 
 
@@ -202,22 +250,29 @@ def _generate_rewrite(sentence: str, issues: list) -> str:
 # Mapping helpers — transform existing output into the spec's JSON shape
 # ---------------------------------------------------------------------------
 
-def _build_flagged_issues(text: str, base_analysis: dict) -> list:
+def _build_flagged_issues(text: str, base_analysis: dict, claude_rewrites: Optional[dict] = None) -> list:
     """
     Enrich the base flagged_passages with colour and suggested rewrites.
-    Always provides a suggested_rewrite for every flagged issue.
+    Uses Claude rewrites when available, falls back to sacred rewriter.
     """
     issues = []
     for fp in base_analysis.get("flagged_passages", []):
         sentence = fp["sentence"]
         color, _ = classify_sentence(sentence)
-        rewrite = _generate_rewrite(sentence, fp["issues"])
+
+        # Use Claude rewrite if available, otherwise fallback
+        if claude_rewrites and sentence in claude_rewrites:
+            rewrite = claude_rewrites[sentence]
+        else:
+            rewrite = _generate_rewrite_fallback(sentence, fp["issues"])
+
+        # Only include rewrite if it's actually different
         issues.append(
             {
                 "sentence": sentence,
                 "color": color,
                 "issues": fp["issues"],
-                "suggested_rewrite": rewrite,
+                "suggested_rewrite": rewrite if rewrite != sentence else None,
             }
         )
     return issues
@@ -496,11 +551,12 @@ def _build_response(
     advanced: dict,
     session_id: str,
     claude_qa: Optional[dict] = None,
+    claude_rewrites: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     return {
         "scores": _corrected_scores(base_analysis),
-        "flagged_issues": _build_flagged_issues(text, base_analysis),
+        "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites),
         "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
         "negative_interpretations": advanced.get("negative_interpretations", []),
         "litigation": _build_litigation(advanced),
@@ -514,10 +570,10 @@ def _build_response(
 # Word export with word-level diffs (replaces sacred export_word)
 # ---------------------------------------------------------------------------
 
-def _export_word_improved(text: str, analysis: dict, output_path: str):
+def _export_word_improved(text: str, analysis: dict, output_path: str, claude_rewrites: Optional[dict] = None):
     """
     Word export with word-level diffs instead of full-sentence strikethrough.
-    Only the changed words are marked, making it far more readable.
+    Uses Claude rewrites when available for context-aware suggestions.
     """
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -562,7 +618,12 @@ def _export_word_improved(text: str, analysis: dict, output_path: str):
             continue
 
         color, issues = classify_sentence(sentence)
-        rewrite = _generate_rewrite(sentence, issues)
+
+        # Use Claude rewrite if available, otherwise fallback
+        if claude_rewrites and sentence in claude_rewrites:
+            rewrite = claude_rewrites[sentence]
+        else:
+            rewrite = _generate_rewrite_fallback(sentence, issues)
 
         para = doc.add_paragraph()
 
@@ -689,8 +750,9 @@ async def analyze(
     # Run all advanced analyses via the wrapper — synchronous, fast
     advanced = run_advanced_analysis(transcript, base_analysis)
 
-    # Fetch prior transcripts + generate Claude Q&A (async, ~3-8 seconds)
+    # Fetch prior transcripts + generate Claude Q&A + rewrites (async, parallel)
     claude_qa = None
+    claude_rewrites = None
     prior_transcripts = []
     if ANTHROPIC_API_KEY:
         logger.info(f"Claude API key present, ticker={ticker}")
@@ -705,23 +767,40 @@ async def analyze(
             except Exception as e:
                 logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
 
-        # Generate Claude-powered Q&A
-        try:
-            logger.info("Calling Claude for Q&A generation...")
-            claude_qa = await _generate_qa_with_claude(
-                transcript, prior_transcripts, base_analysis
+        # Prepare flagged sentences for rewrite
+        flagged_for_rewrite = [
+            {"sentence": fp["sentence"], "issues": fp["issues"]}
+            for fp in base_analysis.get("flagged_passages", [])
+        ]
+
+        # Run Claude Q&A and rewrites IN PARALLEL
+        logger.info("Calling Claude for Q&A + rewrites (parallel)...")
+
+        async def _safe_qa():
+            try:
+                return await _generate_qa_with_claude(transcript, prior_transcripts, base_analysis)
+            except Exception as e:
+                logger.error(f"Claude Q&A failed: {type(e).__name__}: {e}")
+                return None
+
+        async def _safe_rewrites():
+            try:
+                return await _generate_rewrites_with_claude(flagged_for_rewrite)
+            except Exception as e:
+                logger.error(f"Claude rewrites failed: {type(e).__name__}: {e}")
+                return None
+
+        claude_qa, claude_rewrites = await asyncio.gather(_safe_qa(), _safe_rewrites())
+
+        if claude_qa:
+            logger.info(
+                f"Claude generated {claude_qa['total_questions']} questions "
+                f"(used {claude_qa.get('prior_calls_used', 0)} prior calls)"
             )
-            if claude_qa:
-                logger.info(
-                    f"Claude generated {claude_qa['total_questions']} questions "
-                    f"(used {claude_qa.get('prior_calls_used', 0)} prior calls)"
-                )
-            else:
-                logger.warning("Claude Q&A returned None (parse error or empty response)")
-        except Exception as e:
-            logger.error(f"Claude Q&A generation failed: {type(e).__name__}: {e}")
+        if claude_rewrites:
+            logger.info(f"Claude generated {len(claude_rewrites)} rewrites")
     else:
-        logger.info("No ANTHROPIC_API_KEY — using template Q&A fallback")
+        logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
     # Create session
     session_id = str(uuid.uuid4())
@@ -730,9 +809,10 @@ async def analyze(
         "base_analysis": base_analysis,
         "advanced": advanced,
         "claude_qa": claude_qa,
+        "claude_rewrites": claude_rewrites,
     }
 
-    return _build_response(transcript, base_analysis, advanced, session_id, claude_qa)
+    return _build_response(transcript, base_analysis, advanced, session_id, claude_qa, claude_rewrites)
 
 
 @app.get("/api/export/pdf/{session_id}")
@@ -759,7 +839,12 @@ async def get_word(session_id: str):
 
     tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
     tmp.close()
-    _export_word_improved(session["text"], session["base_analysis"], tmp.name)
+    _export_word_improved(
+        session["text"],
+        session["base_analysis"],
+        tmp.name,
+        session.get("claude_rewrites"),
+    )
     return FileResponse(
         tmp.name,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -779,6 +864,7 @@ async def get_json(session_id: str):
         session["advanced"],
         session_id,
         session.get("claude_qa"),
+        session.get("claude_rewrites"),
     )
 
 
