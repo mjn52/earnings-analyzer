@@ -624,6 +624,17 @@ def _export_word_improved(text: str, analysis: dict, output_path: str):
 # Routes
 # ---------------------------------------------------------------------------
 
+@app.get("/api/health")
+async def health():
+    """Diagnostic endpoint — check if API keys are configured."""
+    return {
+        "status": "ok",
+        "anthropic_key_set": bool(ANTHROPIC_API_KEY),
+        "anthropic_key_prefix": ANTHROPIC_API_KEY[:12] + "..." if ANTHROPIC_API_KEY else "NOT SET",
+        "fmp_key_set": bool(FMP_API_KEY),
+    }
+
+
 @app.post("/api/analyze")
 async def analyze(
     file: Optional[UploadFile] = File(None),
