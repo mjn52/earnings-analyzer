@@ -653,18 +653,32 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
     doc.add_paragraph("\u2500" * 50)
     doc.add_paragraph()
 
-    # Build normalized rewrite lookup for flexible sentence matching
-    # The claude_rewrites keys come from flagged_passages (sacred code splitter),
-    # but the Word export re-splits with regex — whitespace may differ.
-    _norm_rewrites = {}
-    if claude_rewrites:
-        for _sent, _rw in claude_rewrites.items():
-            _norm_rewrites[' '.join(_sent.split())] = _rw
-        logger.info(f"Word export: {len(_norm_rewrites)} rewrites in normalized lookup")
+    # Build rewrite lookup from flagged_passages + claude_rewrites.
+    # Key insight: use the EXACT sentence strings from flagged_passages
+    # (same strings sent to Claude) to look up in claude_rewrites, then
+    # store with normalized keys for matching against re-split sentences.
+    _passage_rewrites = {}  # norm_key → rewrite
+    _flagged_count = 0
+    for fp in analysis.get("flagged_passages", []):
+        sent = fp["sentence"]
+        _flagged_count += 1
+        rewrite = None
+        if claude_rewrites:
+            # Exact match — these keys come from the same flagged_passages list
+            rewrite = claude_rewrites.get(sent)
+        if not rewrite or rewrite == sent:
+            rewrite = _generate_rewrite_fallback(sent, fp["issues"])
+        if rewrite and rewrite != sent:
+            _passage_rewrites[' '.join(sent.split())] = rewrite
+
+    logger.info(f"Word export: {_flagged_count} flagged passages, "
+                 f"{len(_passage_rewrites)} with rewrites, "
+                 f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    _rewrite_hits = 0
+    _exact_hits = 0
+    _fuzzy_hits = 0
 
     for sentence in sentences:
         if len(sentence.strip()) < 10:
@@ -672,12 +686,29 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
 
         color, issues = classify_sentence(sentence)
 
-        # Use Claude rewrite if available (normalized matching), otherwise fallback
+        # Step 1: Try normalized exact match
         norm_sentence = ' '.join(sentence.split())
-        rewrite = _norm_rewrites.get(norm_sentence) if _norm_rewrites else None
-        if rewrite and rewrite != sentence:
-            _rewrite_hits += 1
-        else:
+        rewrite = _passage_rewrites.get(norm_sentence)
+
+        if rewrite:
+            _exact_hits += 1
+        elif color in ("RED", "YELLOW") and _passage_rewrites:
+            # Step 2: Fuzzy match — sentence boundaries from regex splitter
+            # may differ from sacred code's splitter
+            best_ratio = 0
+            best_rw = None
+            for key, rw in _passage_rewrites.items():
+                if abs(len(key) - len(norm_sentence)) > 30:
+                    continue
+                ratio = difflib.SequenceMatcher(None, norm_sentence, key).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_rw = rw
+            if best_ratio > 0.8:
+                rewrite = best_rw
+                _fuzzy_hits += 1
+
+        if not rewrite or rewrite == sentence:
             rewrite = _generate_rewrite_fallback(sentence, issues)
 
         para = doc.add_paragraph()
@@ -731,8 +762,8 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
 
         para.add_run(" ")
 
-    if _norm_rewrites:
-        logger.info(f"Word export complete: {_rewrite_hits} Claude rewrite matches out of {len(sentences)} sentences")
+    logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy matches "
+                 f"out of {len(sentences)} sentences")
 
     doc.save(str(output_path))
     return output_path
@@ -772,6 +803,35 @@ async def test_claude():
         }
     except Exception as e:
         return {"status": "error", "error_type": type(e).__name__, "detail": str(e)}
+
+
+@app.get("/api/debug-session/{session_id}")
+async def debug_session(session_id: str):
+    """Diagnostic: shows rewrite pipeline status for a session."""
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    claude_rewrites = session.get("claude_rewrites")
+    flagged = session["base_analysis"].get("flagged_passages", [])
+
+    # Check how many flagged passages would get rewrites
+    match_count = 0
+    if claude_rewrites and flagged:
+        for fp in flagged:
+            sent = fp["sentence"]
+            if sent in claude_rewrites or ' '.join(sent.split()) in claude_rewrites:
+                match_count += 1
+
+    return {
+        "flagged_passage_count": len(flagged),
+        "flagged_sample": [fp["sentence"][:100] for fp in flagged[:5]],
+        "claude_rewrites_is_none": claude_rewrites is None,
+        "claude_rewrites_count": len(claude_rewrites) if claude_rewrites else 0,
+        "claude_rewrite_keys_sample": [k[:100] for k in list(claude_rewrites.keys())[:5]] if claude_rewrites else [],
+        "matched_rewrites": match_count,
+        "claude_qa_source": session.get("claude_qa", {}).get("source", "fallback") if session.get("claude_qa") else "fallback",
+    }
 
 
 @app.post("/api/analyze")
