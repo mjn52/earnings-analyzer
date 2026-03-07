@@ -5,9 +5,10 @@ Wraps existing analysis engine in a REST API.
 
 from typing import Optional, List, Dict
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import tempfile
 import os
 import uuid
@@ -223,3 +224,20 @@ async def get_json(session_id: str):
         session["advanced"],
         session_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Serve React frontend (production — built files in ./static)
+# ---------------------------------------------------------------------------
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+if STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve React app — all non-API routes return index.html."""
+        index = STATIC_DIR / "index.html"
+        return HTMLResponse(index.read_text())
+
