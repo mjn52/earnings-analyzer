@@ -178,15 +178,11 @@ EXAMPLES:
 - "We believe our AI systems may be contributing to engagement" → "We believe our AI systems are contributing to engagement"
 - "Actual results may differ materially from those anticipated." → "Actual results may differ materially from those anticipated, and we encourage investors to review the risk factors in our SEC filings."
 
-Return ONLY valid JSON — no markdown, no code fences:
-{
-  "rewrites": [
-    {"index": 0, "rewrite": "The improved sentence"},
-    {"index": 1, "rewrite": "..."}
-  ]
-}
+Return your rewrites in this EXACT numbered format — one rewrite per line:
+[0] The improved first sentence
+[1] The improved second sentence
 
-The "index" must match the sentence index from the input. Include ALL sentences — every one MUST have a rewrite."""
+CRITICAL: Include ALL indices from the input. Every sentence MUST appear. Do NOT add any explanations, commentary, or extra text — ONLY the numbered rewrites."""
 
 
 async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[dict]:
@@ -226,52 +222,25 @@ async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[di
         logger.info(f"Claude rewrite response: {len(response_text)} chars, "
                      f"stop_reason={response.stop_reason}")
 
-        # Handle potential markdown code fences
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-            response_text = re.sub(r"\s*```$", "", response_text)
-
-        # Parse JSON — handle potential truncation from hitting max_tokens
-        data = None
-        try:
-            data = json.loads(response_text)
-        except json.JSONDecodeError:
-            logger.warning(f"Claude rewrite JSON parse failed (likely truncated). "
-                          f"stop_reason={response.stop_reason}, length={len(response_text)}")
-            # Attempt to salvage partial JSON by closing the array/object
-            try:
-                last_brace = response_text.rfind('}', 0, response_text.rfind('}'))
-                if last_brace > 0:
-                    data = json.loads(response_text[:last_brace + 1] + "]}")
-                    logger.info(f"Salvaged partial JSON with {len(data.get('rewrites', []))} rewrites")
-            except (json.JSONDecodeError, ValueError):
-                logger.error("Could not salvage truncated rewrite response")
-                return None
-
-        if not data:
-            logger.error("No valid JSON data from Claude rewrite response")
-            return None
-
-        rewrites = data.get("rewrites", [])
-
-        # Build a mapping: original sentence → rewrite
-        # Store BOTH exact and whitespace-normalized keys for flexible matching
+        # Parse numbered format: [idx] rewrite text
+        # Far more robust than JSON — handles preamble, code fences, partial output
         result = {}
-        for r in rewrites:
-            idx = r.get("index", -1)
+        pattern = re.compile(r'^\[(\d+)\]\s*(.+)$', re.MULTILINE)
+        for match in pattern.finditer(response_text):
+            idx = int(match.group(1))
+            rewrite_text = match.group(2).strip()
             if 0 <= idx < len(flagged_sentences):
                 original = flagged_sentences[idx]["sentence"]
-                rewrite_text = r.get("rewrite", original)
                 result[original] = rewrite_text
-                # Also store normalized key (collapsed whitespace) for cross-splitter matching
                 norm_key = ' '.join(original.split())
                 if norm_key != original:
                     result[norm_key] = rewrite_text
 
-        logger.info(f"Claude: {len(rewrites)} rewrites for {len(flagged_sentences)} sentences "
+        logger.info(f"Claude: {len(result)} rewrites parsed for {len(flagged_sentences)} sentences "
                      f"(stop_reason={response.stop_reason})")
-        if len(rewrites) < len(flagged_sentences):
-            logger.warning(f"{len(flagged_sentences) - len(rewrites)} sentences missing Claude rewrites")
+
+        if not result:
+            logger.error(f"0 rewrites parsed! Response starts with: {response_text[:500]}")
 
         return result if result else None
 
@@ -597,6 +566,7 @@ def _build_response(
     claude_rewrites: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
+    flagged_passages = base_analysis.get("flagged_passages", [])
     return {
         "scores": _corrected_scores(base_analysis),
         "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites),
@@ -606,6 +576,11 @@ def _build_response(
         "activist_triggers": _build_activist(advanced),
         "guidance_clarity": _build_guidance(advanced),
         "session_id": session_id,
+        "_debug": {
+            "flagged_passage_count": len(flagged_passages),
+            "claude_rewrites_is_none": claude_rewrites is None,
+            "claude_rewrites_count": len(claude_rewrites) if claude_rewrites else 0,
+        },
     }
 
 
