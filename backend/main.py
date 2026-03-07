@@ -213,7 +213,7 @@ async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[di
 
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=8000,
+            max_tokens=16000,
             system=_REWRITE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "\n".join(parts)}],
         )
@@ -646,8 +646,19 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
         if rewrite and rewrite != sent:
             _passage_rewrites[' '.join(sent.split())] = rewrite
 
+    # Also add any claude_rewrites that aren't from flagged_passages
+    # (these come from classify_sentence()-flagged sentences added at analyze time)
+    _extra_from_claude = 0
+    if claude_rewrites:
+        for sent, rewrite in claude_rewrites.items():
+            norm_key = ' '.join(sent.split())
+            if norm_key not in _passage_rewrites and rewrite and rewrite != sent:
+                _passage_rewrites[norm_key] = rewrite
+                _extra_from_claude += 1
+
     logger.info(f"Word export: {_flagged_count} flagged passages, "
-                 f"{len(_passage_rewrites)} with rewrites, "
+                 f"{len(_passage_rewrites)} with rewrites "
+                 f"({_extra_from_claude} extra from classify_sentence via claude_rewrites), "
                  f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
@@ -798,8 +809,25 @@ async def debug_session(session_id: str):
             if sent in claude_rewrites or ' '.join(sent.split()) in claude_rewrites:
                 match_count += 1
 
+    # Count how many classify_sentence would flag beyond flagged_passages
+    text = session.get("text", "")
+    classify_extra = 0
+    flagged_norm = {' '.join(fp["sentence"].split()) for fp in flagged}
+    if text:
+        for sent in re.split(r"(?<=[.!?])\s+", text):
+            if len(sent.strip()) < 10:
+                continue
+            norm = ' '.join(sent.split())
+            if norm in flagged_norm:
+                continue
+            color, _ = classify_sentence(sent)
+            if color in ("RED", "YELLOW"):
+                classify_extra += 1
+
     return {
         "flagged_passage_count": len(flagged),
+        "classify_sentence_extra": classify_extra,
+        "total_sent_to_claude": len(flagged) + classify_extra,
         "flagged_sample": [fp["sentence"][:100] for fp in flagged[:5]],
         "claude_rewrites_is_none": claude_rewrites is None,
         "claude_rewrites_count": len(claude_rewrites) if claude_rewrites else 0,
@@ -860,11 +888,36 @@ async def analyze(
             except Exception as e:
                 logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
 
-        # Prepare flagged sentences for rewrite
+        # Prepare flagged sentences for rewrite — start with flagged_passages
         flagged_for_rewrite = [
             {"sentence": fp["sentence"], "issues": fp["issues"]}
             for fp in base_analysis.get("flagged_passages", [])
         ]
+
+        # Also include sentences that classify_sentence() would flag in the Word export
+        # but aren't in flagged_passages — ensures ALL highlighted sentences get rewrites
+        _fp_count = len(flagged_for_rewrite)
+        existing_norm = {' '.join(fp["sentence"].split()) for fp in flagged_for_rewrite}
+        all_sentences = re.split(r"(?<=[.!?])\s+", transcript)
+        for sent in all_sentences:
+            if len(sent.strip()) < 10:
+                continue
+            norm_sent = ' '.join(sent.split())
+            if norm_sent in existing_norm:
+                continue
+            color, issues = classify_sentence(sent)
+            if color in ("RED", "YELLOW") and issues:
+                flagged_for_rewrite.append({"sentence": sent, "issues": issues})
+                existing_norm.add(norm_sent)
+
+        logger.info(f"Sentences for rewrite: {len(flagged_for_rewrite)} total "
+                     f"({_fp_count} from flagged_passages + "
+                     f"{len(flagged_for_rewrite) - _fp_count} from classify_sentence)")
+
+        # Cap at 80 sentences to manage Claude API costs/token limits
+        if len(flagged_for_rewrite) > 80:
+            logger.warning(f"Capping rewrite batch from {len(flagged_for_rewrite)} to 80 sentences")
+            flagged_for_rewrite = flagged_for_rewrite[:80]
 
         # Run Claude Q&A and rewrites IN PARALLEL
         logger.info("Calling Claude for Q&A + rewrites (parallel)...")
