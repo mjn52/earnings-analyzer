@@ -87,10 +87,25 @@ function QuestionCard({ question, answer, index }) {
 
 export default function AnalystQA({ data }) {
   if (!data) return null
-  const { questions = [], answers = [] } = data
+  const { questions = [], answers = [], source, prior_calls_used } = data
 
   return (
     <div className="space-y-3">
+      {/* Source indicator */}
+      {source === 'claude' && (
+        <div className="flex items-center gap-2 rounded-lg bg-primary/5 px-4 py-2.5">
+          <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+          </svg>
+          <span className="text-xs font-medium text-primary">
+            AI-Generated
+            {prior_calls_used > 0 && (
+              <> · Informed by {prior_calls_used} prior earnings call{prior_calls_used > 1 ? 's' : ''}</>
+            )}
+          </span>
+        </div>
+      )}
+
       {questions.map((q, i) => (
         <QuestionCard key={i} question={q} answer={answers[i]} index={i} />
       ))}

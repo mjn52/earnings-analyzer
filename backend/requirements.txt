@@ -5,3 +5,5 @@ reportlab
 python-docx
 requests
 beautifulsoup4
+anthropic
+httpx

@@ -1,11 +1,14 @@
 """
 StreetSignals.ai — FastAPI Backend
 Wraps existing analysis engine in a REST API.
+Integrates Claude for institutional-grade analyst Q&A.
 """
 
 from typing import Optional, List, Dict
 import re
 import difflib
+import logging
+from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +20,9 @@ import uuid
 import json
 from pathlib import Path
 
+import httpx
+import anthropic
+
 # Existing modules — not modified
 from earnings_analyzer import analyze_transcript, load_lm_dictionary
 from legal_context import analyze_with_legal_context
@@ -27,7 +33,15 @@ from exporters import (
 )
 from advanced_analysis import run_advanced_analysis
 
+logger = logging.getLogger("streetsignals")
+
 app = FastAPI(title="StreetSignals.ai API")
+
+# ---------------------------------------------------------------------------
+# API keys from environment (set in Railway dashboard)
+# ---------------------------------------------------------------------------
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
 
 app.add_middleware(
     CORSMiddleware,
@@ -209,7 +223,8 @@ def _build_flagged_issues(text: str, base_analysis: dict) -> list:
     return issues
 
 
-def _build_analyst_qa(advanced: dict) -> dict:
+def _build_analyst_qa_fallback(advanced: dict) -> dict:
+    """Template-based Q&A from the sacred code — used as fallback."""
     questions = advanced.get("analyst_questions", [])
     answers = advanced.get("proposed_answers", [])
     return {
@@ -217,6 +232,212 @@ def _build_analyst_qa(advanced: dict) -> dict:
         "questions": questions,
         "answers": answers,
     }
+
+
+# ---------------------------------------------------------------------------
+# FMP transcript fetching — auto-pull prior earnings call transcripts
+# ---------------------------------------------------------------------------
+
+async def _fetch_prior_transcripts(ticker: str, num_quarters: int = 4) -> List[dict]:
+    """Fetch the last N quarterly earnings call transcripts from Financial Modeling Prep."""
+    if not FMP_API_KEY or not ticker:
+        return []
+
+    ticker = ticker.strip().upper()
+
+    # Calculate the last N quarters
+    now = datetime.now()
+    quarters = []
+    year, quarter = now.year, (now.month - 1) // 3  # 0-indexed current quarter
+    # Start from the most recently completed quarter
+    for _ in range(num_quarters):
+        if quarter == 0:
+            quarter = 4
+            year -= 1
+        quarters.append((year, quarter))
+        quarter -= 1
+
+    transcripts = []
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for yr, qtr in quarters:
+            try:
+                resp = await client.get(
+                    f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}",
+                    params={"quarter": qtr, "year": yr, "apikey": FMP_API_KEY},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data and isinstance(data, list) and len(data) > 0:
+                        content = data[0].get("content", "")
+                        if content and len(content) > 200:
+                            transcripts.append({
+                                "quarter": f"Q{qtr} {yr}",
+                                "content": content,
+                            })
+            except Exception as e:
+                logger.warning(f"FMP fetch failed for {ticker} Q{qtr} {yr}: {e}")
+                continue
+
+    return transcripts
+
+
+# ---------------------------------------------------------------------------
+# Claude-powered analyst Q&A generation
+# ---------------------------------------------------------------------------
+
+_QA_SYSTEM_PROMPT = """You are a panel of senior sell-side equity research analysts preparing for an upcoming earnings call Q&A session. You have deep expertise in financial analysis and have covered this company for years.
+
+Your task: Based on the company's prepared remarks (and optionally prior call transcripts), generate the toughest, most probing questions that analysts will ask — and draft proposed management responses.
+
+QUESTION GUIDELINES:
+- Ask specific, data-driven questions (reference actual numbers and claims from the script)
+- Follow up on commitments or guidance from prior calls when available
+- Probe hedging language, vague promises, or evasive areas
+- Ask about topics conspicuously absent from the prepared remarks
+- Challenge overly optimistic framing with requests for specifics
+- Each question should feel like it comes from a real analyst who does this for a living
+
+ANSWER GUIDELINES:
+- Responses should be what a well-prepared IR/management team would say
+- Be direct, confident, and data-driven — avoid corporate waffle
+- Reference specific metrics, timelines, and commitments where possible
+- Flag areas where management should have data ready but shouldn't speculate
+
+Return ONLY valid JSON in this exact format (no markdown, no code fences):
+{
+  "questions": [
+    {
+      "question": "The specific analyst question",
+      "topic": "Short topic label (e.g., Revenue, Margins, Guidance)",
+      "confidence": 0.85
+    }
+  ],
+  "answers": [
+    {
+      "answer_strategy": "Short strategy label (e.g., Redirect to Data, Acknowledge & Pivot)",
+      "proposed_answer": "The full proposed management response",
+      "key_data_points": ["Data point 1 to have ready", "Data point 2"],
+      "caution_notes": "What to avoid saying or any risk in this area"
+    }
+  ]
+}
+
+Generate 8-10 questions, ordered by likelihood of being asked. The questions and answers arrays must have the same length (one answer per question)."""
+
+
+async def _generate_qa_with_claude(
+    current_script: str,
+    prior_transcripts: List[dict],
+    base_analysis: dict,
+) -> Optional[dict]:
+    """Generate institutional-grade analyst Q&A using Claude API."""
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        # Build the user prompt
+        parts = []
+
+        # Include prior transcripts if available
+        if prior_transcripts:
+            parts.append("PRIOR EARNINGS CALL TRANSCRIPTS (most recent first):")
+            parts.append("=" * 60)
+            for t in prior_transcripts:
+                # Cap each transcript to ~5000 words to manage token usage
+                words = t["content"].split()
+                truncated = " ".join(words[:5000])
+                parts.append(f"\n--- {t['quarter']} EARNINGS CALL ---")
+                parts.append(truncated)
+                if len(words) > 5000:
+                    parts.append(f"[...truncated from {len(words)} words]")
+            parts.append("=" * 60)
+            parts.append("")
+
+        # Include analysis context (scores and flagged issues help Claude target weak spots)
+        scores = base_analysis.get("scores", {})
+        parts.append("ANALYSIS CONTEXT (weak areas to probe):")
+        parts.append(f"- Sentiment score: {scores.get('sentiment', 'N/A')}/100")
+        parts.append(f"- Confidence score: {scores.get('confidence', 'N/A')}/100")
+        parts.append(f"- Clarity score: {scores.get('clarity', 'N/A')}/100")
+        flagged = base_analysis.get("flagged_passages", [])
+        if flagged:
+            parts.append(f"- {len(flagged)} passages flagged for hedging/vagueness")
+        parts.append("")
+
+        # The current script
+        parts.append("CURRENT PREPARED REMARKS FOR UPCOMING CALL:")
+        parts.append("=" * 60)
+        # Cap at ~8000 words
+        script_words = current_script.split()
+        if len(script_words) > 8000:
+            parts.append(" ".join(script_words[:8000]))
+            parts.append(f"[...truncated from {len(script_words)} words]")
+        else:
+            parts.append(current_script)
+        parts.append("=" * 60)
+
+        parts.append("")
+        if prior_transcripts:
+            parts.append(
+                f"You have {len(prior_transcripts)} prior call transcripts above. "
+                "Reference specific prior commitments, guidance changes, and analyst concerns from those calls."
+            )
+        else:
+            parts.append(
+                "No prior transcripts available. Focus on the current prepared remarks — "
+                "identify weak spots, hedging, vagueness, missing topics, and overly optimistic claims."
+            )
+
+        parts.append("\nGenerate 8-10 analyst questions with proposed management responses.")
+
+        user_prompt = "\n".join(parts)
+
+        # Call Claude with zero-data-retention for privacy
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            extra_headers={"anthropic-beta": "zero-data-retention"},
+            system=_QA_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        # Parse the JSON response
+        response_text = response.content[0].text.strip()
+
+        # Handle potential markdown code fences
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+            response_text = re.sub(r"\s*```$", "", response_text)
+
+        qa_data = json.loads(response_text)
+
+        questions = qa_data.get("questions", [])
+        answers = qa_data.get("answers", [])
+
+        # Validate structure
+        if not questions or not answers:
+            logger.warning("Claude returned empty Q&A")
+            return None
+
+        return {
+            "total_questions": len(questions),
+            "questions": questions,
+            "answers": answers,
+            "source": "claude",
+            "prior_calls_used": len(prior_transcripts),
+        }
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Claude Q&A JSON parse error: {e}")
+        return None
+    except anthropic.APIError as e:
+        logger.error(f"Claude API error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Claude Q&A generation failed: {e}")
+        return None
 
 
 def _build_litigation(advanced: dict) -> dict:
@@ -275,12 +496,13 @@ def _build_response(
     base_analysis: dict,
     advanced: dict,
     session_id: str,
+    claude_qa: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     return {
         "scores": _corrected_scores(base_analysis),
         "flagged_issues": _build_flagged_issues(text, base_analysis),
-        "analyst_qa": _build_analyst_qa(advanced),
+        "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
         "negative_interpretations": advanced.get("negative_interpretations", []),
         "litigation": _build_litigation(advanced),
         "activist_triggers": _build_activist(advanced),
@@ -406,6 +628,7 @@ def _export_word_improved(text: str, analysis: dict, output_path: str):
 async def analyze(
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None),
+    ticker: Optional[str] = Form(None),
 ):
     # Extract transcript text from either source
     transcript = None
@@ -429,11 +652,38 @@ async def analyze(
             detail="Please provide a transcript of at least 100 characters.",
         )
 
-    # Run base analysis (earnings_analyzer)
+    # Run base analysis (earnings_analyzer) — synchronous, fast
     base_analysis = analyze_transcript(transcript, LM_DICT)
 
-    # Run all advanced analyses via the wrapper
+    # Run all advanced analyses via the wrapper — synchronous, fast
     advanced = run_advanced_analysis(transcript, base_analysis)
+
+    # Fetch prior transcripts + generate Claude Q&A (async, ~3-8 seconds)
+    claude_qa = None
+    prior_transcripts = []
+    if ANTHROPIC_API_KEY:
+        # Fetch prior call transcripts if ticker provided
+        if ticker and ticker.strip():
+            try:
+                prior_transcripts = await _fetch_prior_transcripts(ticker.strip())
+                logger.info(
+                    f"Fetched {len(prior_transcripts)} prior transcripts for {ticker.strip().upper()}"
+                )
+            except Exception as e:
+                logger.warning(f"Prior transcript fetch failed: {e}")
+
+        # Generate Claude-powered Q&A
+        try:
+            claude_qa = await _generate_qa_with_claude(
+                transcript, prior_transcripts, base_analysis
+            )
+            if claude_qa:
+                logger.info(
+                    f"Claude generated {claude_qa['total_questions']} questions "
+                    f"(used {claude_qa.get('prior_calls_used', 0)} prior calls)"
+                )
+        except Exception as e:
+            logger.warning(f"Claude Q&A generation failed, using fallback: {e}")
 
     # Create session
     session_id = str(uuid.uuid4())
@@ -441,9 +691,10 @@ async def analyze(
         "text": transcript,
         "base_analysis": base_analysis,
         "advanced": advanced,
+        "claude_qa": claude_qa,
     }
 
-    return _build_response(transcript, base_analysis, advanced, session_id)
+    return _build_response(transcript, base_analysis, advanced, session_id, claude_qa)
 
 
 @app.get("/api/export/pdf/{session_id}")
@@ -489,6 +740,7 @@ async def get_json(session_id: str):
         session["base_analysis"],
         session["advanced"],
         session_id,
+        session.get("claude_qa"),
     )
 
 

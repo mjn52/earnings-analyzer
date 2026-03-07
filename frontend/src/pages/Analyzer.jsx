@@ -120,6 +120,7 @@ const TABS = [
 
 export default function Analyzer() {
   const [text, setText] = useState('')
+  const [ticker, setTicker] = useState('')
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState(null)
   const [activeTab, setActiveTab] = useState('flagged')
@@ -134,6 +135,9 @@ export default function Analyzer() {
         formData.append('file', file)
       } else {
         formData.append('text', inputText)
+      }
+      if (ticker.trim()) {
+        formData.append('ticker', ticker.trim().toUpperCase())
       }
 
       const res = await fetch('/api/analyze', {
@@ -154,7 +158,7 @@ export default function Analyzer() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [ticker])
 
   const handleFile = useCallback(
     (file) => {
@@ -182,6 +186,7 @@ export default function Analyzer() {
   const reset = () => {
     setResults(null)
     setText('')
+    setTicker('')
   }
 
   // ---- RESULTS VIEW ----
@@ -336,6 +341,30 @@ export default function Analyzer() {
             </span>
           </div>
 
+          {/* Ticker input */}
+          <div className="mt-4">
+            <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-text-main">
+              <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+              </svg>
+              Company Ticker
+              <span className="font-normal text-text-muted">(optional)</span>
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="text"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                placeholder="e.g. AAPL"
+                maxLength={10}
+                className="w-32 rounded-lg border border-border bg-white px-3 py-2.5 font-mono text-sm uppercase tracking-wider text-text-main placeholder:text-text-muted/40 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+              <p className="text-xs text-text-muted">
+                Enter the company's ticker to auto-fetch prior earnings calls for smarter Q&A predictions
+              </p>
+            </div>
+          </div>
+
           {/* Analyze button */}
           <button
             onClick={() => handleAnalyze(text)}
@@ -350,7 +379,7 @@ export default function Analyzer() {
           >
             {loading ? (
               <span>
-                Analyzing<span className="dots"></span>
+                {ticker.trim() ? 'Fetching prior calls & analyzing' : 'Analyzing'}<span className="dots"></span>
               </span>
             ) : (
               <>Run Analysis&nbsp;&rarr;</>
