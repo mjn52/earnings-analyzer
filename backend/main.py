@@ -394,11 +394,10 @@ async def _generate_qa_with_claude(
 
         user_prompt = "\n".join(parts)
 
-        # Call Claude with zero-data-retention for privacy
+        # Call Claude (API data is never used for training per Anthropic's API terms)
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4000,
-            extra_headers={"anthropic-beta": "zero-data-retention"},
             system=_QA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -635,6 +634,27 @@ async def health():
     }
 
 
+@app.get("/api/test-claude")
+async def test_claude():
+    """Test Claude API connectivity — makes a tiny call to verify the key works."""
+    if not ANTHROPIC_API_KEY:
+        return {"status": "error", "detail": "ANTHROPIC_API_KEY not set"}
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say hello in exactly 5 words."}],
+        )
+        return {
+            "status": "ok",
+            "model": response.model,
+            "response": response.content[0].text,
+        }
+    except Exception as e:
+        return {"status": "error", "error_type": type(e).__name__, "detail": str(e)}
+
+
 @app.post("/api/analyze")
 async def analyze(
     file: Optional[UploadFile] = File(None),
@@ -673,6 +693,8 @@ async def analyze(
     claude_qa = None
     prior_transcripts = []
     if ANTHROPIC_API_KEY:
+        logger.info(f"Claude API key present, ticker={ticker}")
+
         # Fetch prior call transcripts if ticker provided
         if ticker and ticker.strip():
             try:
@@ -681,10 +703,11 @@ async def analyze(
                     f"Fetched {len(prior_transcripts)} prior transcripts for {ticker.strip().upper()}"
                 )
             except Exception as e:
-                logger.warning(f"Prior transcript fetch failed: {e}")
+                logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
 
         # Generate Claude-powered Q&A
         try:
+            logger.info("Calling Claude for Q&A generation...")
             claude_qa = await _generate_qa_with_claude(
                 transcript, prior_transcripts, base_analysis
             )
@@ -693,8 +716,12 @@ async def analyze(
                     f"Claude generated {claude_qa['total_questions']} questions "
                     f"(used {claude_qa.get('prior_calls_used', 0)} prior calls)"
                 )
+            else:
+                logger.warning("Claude Q&A returned None (parse error or empty response)")
         except Exception as e:
-            logger.warning(f"Claude Q&A generation failed, using fallback: {e}")
+            logger.error(f"Claude Q&A generation failed: {type(e).__name__}: {e}")
+    else:
+        logger.info("No ANTHROPIC_API_KEY — using template Q&A fallback")
 
     # Create session
     session_id = str(uuid.uuid4())
