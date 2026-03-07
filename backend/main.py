@@ -195,13 +195,21 @@ async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[di
     Returns a dict mapping sentence text → rewrite (or same text if no change).
     """
     if not ANTHROPIC_API_KEY or not flagged_sentences:
+        logger.info(f"Skipping Claude rewrites: key={'set' if ANTHROPIC_API_KEY else 'MISSING'}, "
+                     f"sentences={len(flagged_sentences) if flagged_sentences else 0}")
         return None
 
     try:
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
+        logger.info(f"Sending {len(flagged_sentences)} flagged sentences to Claude for rewriting")
+
         # Build the prompt with numbered sentences
-        parts = ["Here are the flagged sentences from an earnings call script. For each one, suggest a rewrite or return it unchanged:\n"]
+        parts = [
+            "Here are the flagged sentences from an earnings call script.",
+            "For EVERY sentence, propose a concrete rewrite that addresses the flagged issues.",
+            "Do NOT return any sentence unchanged.\n",
+        ]
         for i, item in enumerate(flagged_sentences):
             parts.append(f"[{i}] Issues: {', '.join(item['issues'])}")
             parts.append(f"    Sentence: {item['sentence']}")
@@ -209,30 +217,63 @@ async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[di
 
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=8000,
             system=_REWRITE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "\n".join(parts)}],
         )
 
         response_text = response.content[0].text.strip()
+        logger.info(f"Claude rewrite response: {len(response_text)} chars, "
+                     f"stop_reason={response.stop_reason}")
 
         # Handle potential markdown code fences
         if response_text.startswith("```"):
             response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
             response_text = re.sub(r"\s*```$", "", response_text)
 
-        data = json.loads(response_text)
+        # Parse JSON — handle potential truncation from hitting max_tokens
+        data = None
+        try:
+            data = json.loads(response_text)
+        except json.JSONDecodeError:
+            logger.warning(f"Claude rewrite JSON parse failed (likely truncated). "
+                          f"stop_reason={response.stop_reason}, length={len(response_text)}")
+            # Attempt to salvage partial JSON by closing the array/object
+            try:
+                last_brace = response_text.rfind('}', 0, response_text.rfind('}'))
+                if last_brace > 0:
+                    data = json.loads(response_text[:last_brace + 1] + "]}")
+                    logger.info(f"Salvaged partial JSON with {len(data.get('rewrites', []))} rewrites")
+            except (json.JSONDecodeError, ValueError):
+                logger.error("Could not salvage truncated rewrite response")
+                return None
+
+        if not data:
+            logger.error("No valid JSON data from Claude rewrite response")
+            return None
+
         rewrites = data.get("rewrites", [])
 
         # Build a mapping: original sentence → rewrite
+        # Store BOTH exact and whitespace-normalized keys for flexible matching
         result = {}
         for r in rewrites:
             idx = r.get("index", -1)
             if 0 <= idx < len(flagged_sentences):
-                result[flagged_sentences[idx]["sentence"]] = r.get("rewrite", flagged_sentences[idx]["sentence"])
+                original = flagged_sentences[idx]["sentence"]
+                rewrite_text = r.get("rewrite", original)
+                result[original] = rewrite_text
+                # Also store normalized key (collapsed whitespace) for cross-splitter matching
+                norm_key = ' '.join(original.split())
+                if norm_key != original:
+                    result[norm_key] = rewrite_text
 
-        logger.info(f"Claude generated {len(result)} rewrites")
-        return result
+        logger.info(f"Claude: {len(rewrites)} rewrites for {len(flagged_sentences)} sentences "
+                     f"(stop_reason={response.stop_reason})")
+        if len(rewrites) < len(flagged_sentences):
+            logger.warning(f"{len(flagged_sentences) - len(rewrites)} sentences missing Claude rewrites")
+
+        return result if result else None
 
     except Exception as e:
         logger.error(f"Claude rewrite generation failed: {type(e).__name__}: {e}")
@@ -261,10 +302,11 @@ def _build_flagged_issues(text: str, base_analysis: dict, claude_rewrites: Optio
         sentence = fp["sentence"]
         color, _ = classify_sentence(sentence)
 
-        # Use Claude rewrite if available, otherwise fallback
-        if claude_rewrites and sentence in claude_rewrites:
-            rewrite = claude_rewrites[sentence]
-        else:
+        # Use Claude rewrite if available (try exact match, then normalized)
+        rewrite = None
+        if claude_rewrites:
+            rewrite = claude_rewrites.get(sentence) or claude_rewrites.get(' '.join(sentence.split()))
+        if not rewrite or rewrite == sentence:
             rewrite = _generate_rewrite_fallback(sentence, fp["issues"])
 
         # Only include rewrite if it's actually different
@@ -611,8 +653,18 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
     doc.add_paragraph("\u2500" * 50)
     doc.add_paragraph()
 
+    # Build normalized rewrite lookup for flexible sentence matching
+    # The claude_rewrites keys come from flagged_passages (sacred code splitter),
+    # but the Word export re-splits with regex — whitespace may differ.
+    _norm_rewrites = {}
+    if claude_rewrites:
+        for _sent, _rw in claude_rewrites.items():
+            _norm_rewrites[' '.join(_sent.split())] = _rw
+        logger.info(f"Word export: {len(_norm_rewrites)} rewrites in normalized lookup")
+
     # Process sentences
     sentences = re.split(r"(?<=[.!?])\s+", text)
+    _rewrite_hits = 0
 
     for sentence in sentences:
         if len(sentence.strip()) < 10:
@@ -620,9 +672,11 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
 
         color, issues = classify_sentence(sentence)
 
-        # Use Claude rewrite if available, otherwise fallback
-        if claude_rewrites and sentence in claude_rewrites:
-            rewrite = claude_rewrites[sentence]
+        # Use Claude rewrite if available (normalized matching), otherwise fallback
+        norm_sentence = ' '.join(sentence.split())
+        rewrite = _norm_rewrites.get(norm_sentence) if _norm_rewrites else None
+        if rewrite and rewrite != sentence:
+            _rewrite_hits += 1
         else:
             rewrite = _generate_rewrite_fallback(sentence, issues)
 
@@ -676,6 +730,9 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
             para.add_run(sentence)
 
         para.add_run(" ")
+
+    if _norm_rewrites:
+        logger.info(f"Word export complete: {_rewrite_hits} Claude rewrite matches out of {len(sentences)} sentences")
 
     doc.save(str(output_path))
     return output_path
