@@ -4,12 +4,23 @@ function scoreColor(score) {
   return 'text-danger'
 }
 
+function severityColor(severity) {
+  if (severity === 'high') return 'text-danger'
+  if (severity === 'medium') return 'text-warning'
+  return 'text-text-muted'
+}
+
 export default function GuidanceTable({ data }) {
   if (!data) return null
 
   const { clarity_score, grade, detail } = data
   const metrics = detail?.metrics_covered || []
   const missing = detail?.metrics_missing || []
+  const findings = detail?.findings || []
+  const posSignals = detail?.positive_signals || []
+  const negSignals = detail?.negative_signals || []
+
+  const hasContent = metrics.length > 0 || missing.length > 0 || findings.length > 0 || posSignals.length > 0 || negSignals.length > 0
 
   return (
     <div className="space-y-4">
@@ -25,6 +36,13 @@ export default function GuidanceTable({ data }) {
         </div>
       </div>
 
+      {/* Empty state */}
+      {!hasContent && (
+        <div className="rounded-xl border border-border bg-white p-6 text-center text-sm text-text-muted">
+          No guidance metrics detected in this transcript.
+        </div>
+      )}
+
       {/* Metrics table */}
       {(metrics.length > 0 || missing.length > 0) && (
         <div className="overflow-hidden rounded-xl border border-border bg-white">
@@ -38,7 +56,7 @@ export default function GuidanceTable({ data }) {
             </thead>
             <tbody className="divide-y divide-border">
               {metrics.map((m, i) => {
-                const metricName = typeof m === 'string' ? m : m.metric || m.name || m
+                const metricName = typeof m === 'string' ? m : m.metric || m.name || String(m)
                 const quantified = typeof m === 'object' && m.quantified
                 return (
                   <tr key={i}>
@@ -57,7 +75,7 @@ export default function GuidanceTable({ data }) {
                 )
               })}
               {missing.map((m, i) => {
-                const metricName = typeof m === 'string' ? m : m.metric || m.name || m
+                const metricName = typeof m === 'string' ? m : m.metric || m.name || String(m)
                 return (
                   <tr key={`miss-${i}`}>
                     <td className="px-4 py-3 font-medium text-text-main capitalize">{metricName}</td>
@@ -73,24 +91,48 @@ export default function GuidanceTable({ data }) {
         </div>
       )}
 
-      {/* Positive / Negative signals */}
-      {detail?.positive_signals?.length > 0 && (
+      {/* Findings */}
+      {findings.length > 0 && (
+        <div className="rounded-xl border border-border bg-white p-4">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-text-muted">Findings</p>
+          <ul className="space-y-2 text-sm">
+            {findings.map((f, i) => {
+              const issue = typeof f === 'string' ? f : f.issue || f.detail || String(f)
+              const severity = typeof f === 'object' ? f.severity : null
+              return (
+                <li key={i} className="flex items-start gap-2">
+                  {severity && (
+                    <span className={`mt-0.5 shrink-0 text-xs font-medium uppercase ${severityColor(severity)}`}>
+                      [{severity}]
+                    </span>
+                  )}
+                  <span className="text-text-muted">{issue}</span>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+
+      {/* Positive signals */}
+      {posSignals.length > 0 && (
         <div className="rounded-xl border border-border bg-white p-4">
           <p className="mb-2 text-xs font-medium uppercase tracking-wide text-success">Positive Signals</p>
           <ul className="list-inside list-disc space-y-1 text-sm text-text-muted">
-            {detail.positive_signals.map((s, i) => (
-              <li key={i}>{s}</li>
+            {posSignals.map((s, i) => (
+              <li key={i}>{typeof s === 'string' ? s : s.signal || String(s)}</li>
             ))}
           </ul>
         </div>
       )}
 
-      {detail?.negative_signals?.length > 0 && (
+      {/* Negative signals */}
+      {negSignals.length > 0 && (
         <div className="rounded-xl border border-border bg-white p-4">
           <p className="mb-2 text-xs font-medium uppercase tracking-wide text-danger">Negative Signals</p>
           <ul className="list-inside list-disc space-y-1 text-sm text-text-muted">
-            {detail.negative_signals.map((s, i) => (
-              <li key={i}>{s}</li>
+            {negSignals.map((s, i) => (
+              <li key={i}>{typeof s === 'string' ? s : s.signal || String(s)}</li>
             ))}
           </ul>
         </div>
