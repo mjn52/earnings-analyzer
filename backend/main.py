@@ -155,37 +155,38 @@ def _corrected_scores(base_analysis: dict) -> dict:
 
 _REWRITE_SYSTEM_PROMPT = """You are an expert IR (Investor Relations) editor reviewing an earnings call script.
 
-Your job: Suggest targeted rewrites for flagged sentences to make management sound more confident and direct — BUT only when appropriate.
+Your job: For each flagged sentence, propose a concrete rewrite that addresses the flagged issues while respecting legal and contextual constraints.
 
 CRITICAL RULES:
-1. NEVER modify safe harbor statements, forward-looking statement disclaimers, or legal boilerplate. These MUST stay exactly as written. Words like "may", "could", "might" in legal disclaimers are legally required.
-2. NEVER change cautionary risk disclosures. If management is intentionally flagging a risk or uncertainty, preserve that intent.
-3. ONLY rewrite hedging language that genuinely weakens the message without serving a legal or cautionary purpose.
-4. Preserve grammatical correctness — every rewrite must read naturally.
-5. Preserve the original meaning. Don't turn uncertain statements into definitive claims.
-6. Make minimal changes — change as few words as possible.
-7. If a sentence is fine as-is (legal language, appropriate caution, or already clear), return it UNCHANGED.
+1. NEVER modify safe harbor statements, forward-looking statement disclaimers, or legal boilerplate. For these, propose a rewrite that adds context or strengthens the surrounding language while keeping the legally required words intact.
+2. NEVER change cautionary risk disclosures into definitive claims. Instead, tighten the language to sound more deliberate and less uncertain.
+3. Preserve grammatical correctness — every rewrite must read naturally.
+4. Preserve the original meaning. Don't turn uncertain statements into definitive claims.
+5. Make minimal changes — change as few words as possible.
+6. EVERY sentence MUST get a rewrite that improves it, even if the improvement is subtle. No sentence should be returned unchanged.
 
-EXAMPLES OF WHAT TO FIX:
+STRATEGIES FOR DIFFERENT ISSUE TYPES:
+- Hedging (unnecessary): Remove filler words like "somewhat", "relatively", "generally" when they add no meaning.
+- Hedging (legal/cautionary): Keep the hedging words but tighten the sentence structure, remove redundancy, or add specificity.
+- Weak verbs: "We hope" → "We expect", "We feel" → "We are confident", "We think" → "We believe"
+- Vague language: Add specificity or restructure for directness.
+- Safe harbor boilerplate: Rewrite surrounding context to be more direct while preserving required legal language verbatim.
+
+EXAMPLES:
 - "We are cautiously optimistic about growth" → "We are optimistic about growth"
-- "We hope to see improvement" → "We expect to see improvement" (only if context supports it)
-- Removing unnecessary filler: "somewhat", "relatively", "generally" when they add no meaning
-
-EXAMPLES OF WHAT TO LEAVE ALONE:
-- "Actual results may differ materially" — LEGAL, do not touch
-- "We may not achieve the level of adoption" — INTENTIONAL RISK DISCLOSURE
-- "Factors that could cause results to differ" — LEGAL, do not touch
-- "We believe our approach positions us well" — APPROPRIATE, "believe" is fine here
+- "We hope to see improvement" → "We expect to see improvement"
+- "We believe our AI systems may be contributing to engagement" → "We believe our AI systems are contributing to engagement"
+- "Actual results may differ materially from those anticipated." → "Actual results may differ materially from those anticipated, and we encourage investors to review the risk factors in our SEC filings."
 
 Return ONLY valid JSON — no markdown, no code fences:
 {
   "rewrites": [
-    {"index": 0, "rewrite": "The rewritten sentence or exact original if no change needed"},
+    {"index": 0, "rewrite": "The improved sentence"},
     {"index": 1, "rewrite": "..."}
   ]
 }
 
-The "index" must match the sentence index from the input. Include ALL sentences in the output."""
+The "index" must match the sentence index from the input. Include ALL sentences — every one MUST have a rewrite."""
 
 
 async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[dict]:
@@ -590,7 +591,7 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
     instructions.add_run(
         "This document shows suggested revisions to improve your earnings script. "
         "Red strikethrough text should be removed or replaced. "
-        "Green underlined text shows the suggested replacement. "
+        "Blue underlined text shows proposed additions or replacements. "
         "Accept or reject changes as appropriate for your communication style."
     )
     doc.add_paragraph()
@@ -602,10 +603,10 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
     strike_run.font.strike = True
     strike_run.font.color.rgb = RGBColor(180, 0, 0)
     legend.add_run(" = Remove  |  ")
-    add_run = legend.add_run("Green Text")
+    add_run = legend.add_run("Blue Text")
     add_run.font.underline = True
-    add_run.font.color.rgb = RGBColor(0, 128, 0)
-    legend.add_run(" = Replacement")
+    add_run.font.color.rgb = RGBColor(26, 86, 219)
+    legend.add_run(" = Addition")
     doc.add_paragraph()
     doc.add_paragraph("\u2500" * 50)
     doc.add_paragraph()
@@ -644,7 +645,7 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
                     # Green underline the new words
                     new_run = para.add_run(" ".join(new_words[j1:j2]) + " ")
                     new_run.font.underline = True
-                    new_run.font.color.rgb = RGBColor(0, 128, 0)
+                    new_run.font.color.rgb = RGBColor(26, 86, 219)
                 elif op == "delete":
                     old_run = para.add_run(" ".join(orig_words[i1:i2]) + " ")
                     old_run.font.strike = True
@@ -652,7 +653,7 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
                 elif op == "insert":
                     new_run = para.add_run(" ".join(new_words[j1:j2]) + " ")
                     new_run.font.underline = True
-                    new_run.font.color.rgb = RGBColor(0, 128, 0)
+                    new_run.font.color.rgb = RGBColor(26, 86, 219)
 
             if issues:
                 comment = para.add_run("  [" + ", ".join(issues) + "]")
