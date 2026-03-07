@@ -77,8 +77,8 @@ if not st.session_state.analyzed:
         st.subheader("📄 Upload Script")
         uploaded_file = st.file_uploader(
             "Upload your earnings script",
-            type=["txt", "md", "doc"],
-            help="Upload your earnings script (.txt, .md, or .doc)"
+            type=["txt", "md", "docx"],
+            help="Upload your earnings script (.txt, .md, or .docx)"
         )
     
     with col2:
@@ -92,8 +92,32 @@ if not st.session_state.analyzed:
     # Process input
     final_text = ""
     if uploaded_file:
-        final_text = uploaded_file.read().decode("utf-8")
-        st.success(f"✓ Loaded {uploaded_file.name} ({len(final_text):,} characters)")
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        
+        if file_extension == 'docx':
+            # Handle Word documents
+            try:
+                from docx import Document
+                import io
+                doc = Document(io.BytesIO(uploaded_file.read()))
+                final_text = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+            except Exception as e:
+                st.error(f"Error reading .docx file: {e}")
+                final_text = ""
+        else:
+            # Handle plain text files (.txt, .md)
+            try:
+                final_text = uploaded_file.read().decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    uploaded_file.seek(0)
+                    final_text = uploaded_file.read().decode("latin-1")
+                except Exception as e:
+                    st.error(f"Error reading file: {e}")
+                    final_text = ""
+        
+        if final_text:
+            st.success(f"✓ Loaded {uploaded_file.name} ({len(final_text):,} characters)")
     elif text_input:
         final_text = text_input
     
