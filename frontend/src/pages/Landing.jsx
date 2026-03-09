@@ -162,7 +162,7 @@ export default function Landing() {
               href="#what-it-analyzes"
               className="inline-flex items-center gap-2 rounded-xl border border-border bg-white px-8 py-3.5 text-base font-medium text-text-main transition-colors hover:border-primary hover:text-primary"
             >
-              See a Sample Report
+              What We Analyze&nbsp;&darr;
             </a>
           </div>
         </div>
