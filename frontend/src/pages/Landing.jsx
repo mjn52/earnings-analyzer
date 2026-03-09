@@ -308,7 +308,7 @@ export default function Landing() {
                 icon: <IconLitigation />,
                 title: 'Litigation Risk Scan',
                 desc: 'PSLRA safe harbor compliance and securities liability check.',
-                source: 'Securities Law',
+                source: 'Securities Lawyers',
               },
               {
                 icon: <IconActivist />,
@@ -326,13 +326,13 @@ export default function Landing() {
                 icon: <IconConfidence />,
                 title: 'AI-Powered Rewrites',
                 desc: 'Context-aware edit suggestions for every flagged sentence.',
-                source: 'Claude AI',
+                source: 'LLMs',
               },
               {
                 icon: <IconExport />,
                 title: 'Word & PDF Exports',
                 desc: 'Redline Word docs and color-coded PDF reports for your team.',
-                source: 'IR Workflow',
+                source: 'Industry-Standard Formats',
               },
               {
                 icon: <IconAnalysis />,
