@@ -145,7 +145,7 @@ export default function Landing() {
             className="animate-fade-up mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-text-muted md:text-xl"
             style={{ animationDelay: '100ms' }}
           >
-            Run your earnings call draft through 12 institutional-grade analyses — before a single analyst listens.
+            Run your earnings call draft through 8 institutional-grade analyses — before a single analyst listens.
           </p>
 
           <div
@@ -167,57 +167,89 @@ export default function Landing() {
           </div>
         </div>
 
-        {/* Capability highlights */}
+        {/* Capability highlights — 4x2 grid */}
         <div className="mx-auto mt-16 max-w-5xl">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-              style={{ animationDelay: '200ms' }}
-            >
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                </svg>
+            {[
+              {
+                delay: '200ms',
+                iconBg: 'bg-primary/10',
+                iconColor: 'text-primary',
+                iconPath: 'M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6',
+                title: 'StreetSignals Score',
+                desc: 'Overall grade combining sentiment, confidence, ownership, clarity & red flags',
+              },
+              {
+                delay: '250ms',
+                iconBg: 'bg-danger/10',
+                iconColor: 'text-danger',
+                iconPath: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z',
+                title: 'Litigation Risk Scan',
+                desc: 'PSLRA safe harbor compliance and securities liability language check',
+              },
+              {
+                delay: '300ms',
+                iconBg: 'bg-warning/10',
+                iconColor: 'text-warning',
+                iconPath: 'M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z',
+                title: 'Activist Vulnerability Scan',
+                desc: 'Flags language patterns that shareholder activists target',
+              },
+              {
+                delay: '350ms',
+                iconBg: 'bg-primary/10',
+                iconColor: 'text-primary',
+                iconPath: 'M12 9v3.75m0-10.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z',
+                title: 'Negative Interpretation Scan',
+                desc: '18-pattern detector for language the street may read negatively',
+              },
+              {
+                delay: '400ms',
+                iconBg: 'bg-primary/10',
+                iconColor: 'text-primary',
+                iconPath: 'M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10',
+                title: 'AI-Powered Rewrites',
+                desc: 'Every flagged sentence gets a context-aware rewrite suggestion',
+              },
+              {
+                delay: '450ms',
+                iconBg: 'bg-success/10',
+                iconColor: 'text-success',
+                iconPath: 'M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z',
+                title: 'Word & PDF Exports',
+                desc: 'Download redline Word docs and color-coded PDFs for your team',
+              },
+              {
+                delay: '500ms',
+                iconBg: 'bg-success/10',
+                iconColor: 'text-success',
+                iconPath: 'M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941',
+                title: 'Stock Impact Prediction',
+                desc: 'See projected price reaction before and after suggested edits',
+              },
+              {
+                delay: '550ms',
+                iconBg: 'bg-warning/10',
+                iconColor: 'text-warning',
+                iconPath: 'M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z',
+                title: 'Analyst Q&A Prep',
+                desc: 'AI-generated tough questions with proposed answers to rehearse',
+              },
+            ].map((card, i) => (
+              <div
+                key={i}
+                className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+                style={{ animationDelay: card.delay }}
+              >
+                <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${card.iconBg}`}>
+                  <svg className={`h-5 w-5 ${card.iconColor}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d={card.iconPath} />
+                  </svg>
+                </div>
+                <p className="mt-3 text-sm font-semibold text-text-main">{card.title}</p>
+                <p className="mt-1 text-xs leading-relaxed text-text-muted">{card.desc}</p>
               </div>
-              <p className="mt-3 text-sm font-semibold text-text-main">AI-Powered Rewrites</p>
-              <p className="mt-1 text-xs leading-relaxed text-text-muted">Line-by-line edit suggestions powered by Claude, tailored to your script</p>
-            </div>
-            <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-              style={{ animationDelay: '250ms' }}
-            >
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-success/10">
-                <svg className="h-5 w-5 text-success" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-semibold text-text-main">Stock Impact Prediction</p>
-              <p className="mt-1 text-xs leading-relaxed text-text-muted">See how your language patterns map to historical price movements</p>
-            </div>
-            <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-              style={{ animationDelay: '300ms' }}
-            >
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-warning/10">
-                <svg className="h-5 w-5 text-warning" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-semibold text-text-main">Analyst Q&A Prep</p>
-              <p className="mt-1 text-xs leading-relaxed text-text-muted">Anticipate tough questions before they're asked, with proposed answers</p>
-            </div>
-            <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-              style={{ animationDelay: '350ms' }}
-            >
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
-                </svg>
-              </div>
-              <p className="mt-3 text-sm font-semibold text-text-main">12 Dimensions Scanned</p>
-              <p className="mt-1 text-xs leading-relaxed text-text-muted">Sentiment, confidence, red flags, litigation risk, guidance clarity & more</p>
-            </div>
+            ))}
           </div>
         </div>
       </section>
@@ -237,8 +269,8 @@ export default function Landing() {
               },
               {
                 icon: <IconAnalysis />,
-                title: '12-Dimension Analysis',
-                desc: 'Sentiment, confidence, litigation risk, analyst Q&A prep, and more.',
+                title: '8-Dimension Analysis',
+                desc: 'Scoring, risk scans, AI rewrites, stock prediction, Q&A prep, and more.',
               },
               {
                 icon: <IconExport />,
@@ -261,46 +293,58 @@ export default function Landing() {
         <div className="mx-auto max-w-5xl">
           <h2 className="text-center font-sora text-3xl font-bold text-text-main">What It Analyzes</h2>
           <p className="mx-auto mt-3 max-w-xl text-center text-text-muted">
-            Six research-backed dimensions, each calibrated against institutional standards.
+            Eight research-backed analyses, each calibrated against institutional standards.
           </p>
 
-          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             {[
               {
                 icon: <IconSentiment />,
-                title: 'Sentiment Score',
-                desc: 'Loughran-McDonald 86K word financial dictionary.',
-                source: 'LM Master Dictionary',
-              },
-              {
-                icon: <IconConfidence />,
-                title: 'Confidence Detection',
-                desc: 'Larcker-Zakolyukina hedging framework.',
-                source: 'Stanford Research',
+                title: 'StreetSignals Score',
+                desc: 'Composite grade across sentiment, confidence, ownership, clarity & red flags.',
+                source: 'LM Dictionary + Stanford Research',
               },
               {
                 icon: <IconLitigation />,
-                title: 'Litigation Risk',
-                desc: 'PSLRA safe harbor compliance check.',
+                title: 'Litigation Risk Scan',
+                desc: 'PSLRA safe harbor compliance and securities liability check.',
                 source: 'Securities Law',
+              },
+              {
+                icon: <IconActivist />,
+                title: 'Activist Vulnerability',
+                desc: 'Shareholder activist language patterns and governance triggers.',
+                source: 'Governance Research',
+              },
+              {
+                icon: <IconNegative />,
+                title: 'Negative Interpretation',
+                desc: '18-pattern detector for language the street may read negatively.',
+                source: 'Sell-Side Patterns',
+              },
+              {
+                icon: <IconConfidence />,
+                title: 'AI-Powered Rewrites',
+                desc: 'Context-aware edit suggestions for every flagged sentence.',
+                source: 'Claude AI',
+              },
+              {
+                icon: <IconExport />,
+                title: 'Word & PDF Exports',
+                desc: 'Redline Word docs and color-coded PDF reports for your team.',
+                source: 'IR Workflow',
+              },
+              {
+                icon: <IconAnalysis />,
+                title: 'Stock Impact Prediction',
+                desc: 'Projected price reaction based on historical language patterns.',
+                source: 'Academic Research',
               },
               {
                 icon: <IconQA />,
                 title: 'Analyst Q&A Prep',
-                desc: '50-topic question prediction engine.',
+                desc: 'AI-generated tough questions with proposed answers to rehearse.',
                 source: 'IR Best Practices',
-              },
-              {
-                icon: <IconNegative />,
-                title: 'Negative Interpretation Scan',
-                desc: '18-pattern market reaction detector.',
-                source: 'Sell-Side Patterns',
-              },
-              {
-                icon: <IconActivist />,
-                title: 'Activist Trigger Analysis',
-                desc: 'Shareholder activist vulnerability assessment.',
-                source: 'Governance Research',
               },
             ].map((card, i) => (
               <div
