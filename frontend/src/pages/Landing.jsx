@@ -167,51 +167,56 @@ export default function Landing() {
           </div>
         </div>
 
-        {/* Floating preview badges */}
+        {/* Capability highlights */}
         <div className="mx-auto mt-16 max-w-5xl">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
               style={{ animationDelay: '200ms' }}
             >
-              <p className="text-xs font-medium uppercase tracking-wide text-text-muted">Overall Score</p>
-              <p className="mt-1 font-mono text-2xl font-bold text-text-main">74<span className="text-sm text-text-muted">/100</span></p>
-              <p className="mt-0.5 text-sm text-text-muted">Grade: <span className="font-semibold text-warning">B</span></p>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+                <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                </svg>
+              </div>
+              <p className="mt-3 text-sm font-semibold text-text-main">AI-Powered Rewrites</p>
+              <p className="mt-1 text-xs leading-relaxed text-text-muted">Line-by-line edit suggestions powered by Claude, tailored to your script</p>
             </div>
             <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
               style={{ animationDelay: '250ms' }}
             >
-              <div className="flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">&#10003;</span>
-                <span className="text-sm font-medium text-text-main">Safe Harbor Present</span>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-success/10">
+                <svg className="h-5 w-5 text-success" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+                </svg>
               </div>
-              <div className="mt-3 flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">&#10003;</span>
-                <span className="text-sm font-medium text-text-main">Confidence Score: 81</span>
-              </div>
+              <p className="mt-3 text-sm font-semibold text-text-main">Stock Impact Prediction</p>
+              <p className="mt-1 text-xs leading-relaxed text-text-muted">See how your language patterns map to historical price movements</p>
             </div>
             <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
               style={{ animationDelay: '300ms' }}
             >
-              <div className="flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-warning/10 text-warning">&#9888;</span>
-                <span className="text-sm font-medium text-text-main">Hedging Detected</span>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-warning/10">
+                <svg className="h-5 w-5 text-warning" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
+                </svg>
               </div>
-              <p className="mt-1 pl-7 text-xs text-text-muted">Q&amp;A Section</p>
-              <div className="mt-3 flex items-center gap-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">&#10003;</span>
-                <span className="text-sm font-medium text-text-main">Guidance Clarity: B+</span>
-              </div>
+              <p className="mt-3 text-sm font-semibold text-text-main">Analyst Q&A Prep</p>
+              <p className="mt-1 text-xs leading-relaxed text-text-muted">Anticipate tough questions before they're asked, with proposed answers</p>
             </div>
             <div
-              className="animate-fade-up rounded-xl border border-border bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              className="animate-fade-up rounded-xl border border-border bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
               style={{ animationDelay: '350ms' }}
             >
-              <p className="text-xs font-medium uppercase tracking-wide text-text-muted">Dimensions Scanned</p>
-              <p className="mt-1 font-mono text-2xl font-bold text-primary">12</p>
-              <p className="mt-0.5 text-sm text-text-muted">Institutional-grade checks</p>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+                <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                </svg>
+              </div>
+              <p className="mt-3 text-sm font-semibold text-text-main">12 Dimensions Scanned</p>
+              <p className="mt-1 text-xs leading-relaxed text-text-muted">Sentiment, confidence, red flags, litigation risk, guidance clarity & more</p>
             </div>
           </div>
         </div>
