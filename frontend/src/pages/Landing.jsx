@@ -128,7 +128,7 @@ export default function Landing() {
         <div className="mx-auto max-w-4xl text-center">
           {/* Pill badge */}
           <div className="animate-fade-up mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-white px-4 py-1.5 text-sm text-text-muted shadow-sm">
-            Pre-flight check for earnings calls&nbsp;&bull;
+            Pre-flight check for earnings calls
           </div>
 
           <h1
