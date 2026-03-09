@@ -129,7 +129,7 @@ export default function Analyzer() {
   const [uploadedFile, setUploadedFile] = useState(null)
   const fileRef = useRef(null)
 
-  const ALLOWED_EXTS = ['txt', 'docx', 'doc', 'md', 'pdf']
+  const ALLOWED_EXTS = ['txt', 'docx', 'md', 'pdf']
 
   const handleAnalyze = useCallback(async () => {
     setLoading(true)
@@ -169,7 +169,7 @@ export default function Analyzer() {
       if (!file) return
       const ext = file.name.split('.').pop().toLowerCase()
       if (!ALLOWED_EXTS.includes(ext)) {
-        alert('Please upload a .txt, .md, .doc, .docx, or .pdf file.')
+        alert('Please upload a .txt, .md, .docx, or .pdf file.')
         return
       }
       setUploadedFile(file)
@@ -332,13 +332,13 @@ export default function Analyzer() {
                 <p className="mt-3 text-sm font-medium text-text-main">
                   Drop your file here, or click to upload
                 </p>
-                <p className="mt-1 text-xs text-text-muted">.txt, .doc, .docx, .pdf, or .md</p>
+                <p className="mt-1 text-xs text-text-muted">.txt, .docx, .pdf, or .md</p>
               </>
             )}
             <input
               ref={fileRef}
               type="file"
-              accept=".txt,.docx,.doc,.md,.pdf"
+              accept=".txt,.docx,.md,.pdf"
               className="hidden"
               onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = '' }}
             />

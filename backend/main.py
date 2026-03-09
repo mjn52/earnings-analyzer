@@ -930,14 +930,6 @@ async def analyze(
             from docx import Document
             doc = Document(io.BytesIO(raw))
             transcript = "\n".join(p.text for p in doc.paragraphs)
-        elif fname.endswith(".doc"):
-            # Legacy .doc — try to extract readable text
-            text_content = raw.decode("utf-8", errors="replace")
-            # Strip non-printable characters common in .doc binary format
-            import string
-            transcript = "".join(
-                ch if ch in string.printable else " " for ch in text_content
-            )
         elif fname.endswith(".pdf"):
             import io
             from pypdf import PdfReader
