@@ -126,16 +126,19 @@ export default function Analyzer() {
   const [results, setResults] = useState(null)
   const [activeTab, setActiveTab] = useState('flagged')
   const [dragOver, setDragOver] = useState(false)
+  const [uploadedFile, setUploadedFile] = useState(null)
   const fileRef = useRef(null)
 
-  const handleAnalyze = useCallback(async (inputText, file) => {
+  const ALLOWED_EXTS = ['txt', 'docx', 'doc', 'md', 'pdf']
+
+  const handleAnalyze = useCallback(async () => {
     setLoading(true)
     try {
       const formData = new FormData()
-      if (file) {
-        formData.append('file', file)
+      if (uploadedFile) {
+        formData.append('file', uploadedFile)
       } else {
-        formData.append('text', inputText)
+        formData.append('text', text)
       }
       if (ticker.trim()) {
         formData.append('ticker', ticker.trim().toUpperCase())
@@ -159,19 +162,20 @@ export default function Analyzer() {
     } finally {
       setLoading(false)
     }
-  }, [ticker])
+  }, [text, ticker, uploadedFile])
 
   const handleFile = useCallback(
     (file) => {
       if (!file) return
       const ext = file.name.split('.').pop().toLowerCase()
-      if (!['txt', 'docx', 'md'].includes(ext)) {
-        alert('Please upload a .txt, .md, or .docx file.')
+      if (!ALLOWED_EXTS.includes(ext)) {
+        alert('Please upload a .txt, .md, .doc, .docx, or .pdf file.')
         return
       }
-      handleAnalyze(null, file)
+      setUploadedFile(file)
+      setText('')
     },
-    [handleAnalyze]
+    []
   )
 
   const handleDrop = useCallback(
@@ -188,6 +192,7 @@ export default function Analyzer() {
     setResults(null)
     setText('')
     setTicker('')
+    setUploadedFile(null)
   }
 
   // ---- RESULTS VIEW ----
@@ -304,25 +309,38 @@ export default function Analyzer() {
           {/* Drop zone */}
           <div
             className={`mt-8 flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 transition-colors ${
-              dragOver ? 'border-primary bg-primary/5' : 'border-border bg-white hover:border-primary/50'
+              dragOver ? 'border-primary bg-primary/5' : uploadedFile ? 'border-primary/50 bg-primary/5' : 'border-border bg-white hover:border-primary/50'
             }`}
             onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
             onDragLeave={() => setDragOver(false)}
             onDrop={handleDrop}
             onClick={() => fileRef.current?.click()}
           >
-            <svg className="h-8 w-8 text-text-muted" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-            </svg>
-            <p className="mt-3 text-sm font-medium text-text-main">
-              Drop your .txt or .docx file here, or click to upload
-            </p>
+            {uploadedFile ? (
+              <>
+                <svg className="h-8 w-8 text-success" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p className="mt-3 text-sm font-medium text-text-main">{uploadedFile.name}</p>
+                <p className="mt-1 text-xs text-text-muted">Click to replace, or enter your ticker below and hit Run Analysis</p>
+              </>
+            ) : (
+              <>
+                <svg className="h-8 w-8 text-text-muted" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p className="mt-3 text-sm font-medium text-text-main">
+                  Drop your file here, or click to upload
+                </p>
+                <p className="mt-1 text-xs text-text-muted">.txt, .doc, .docx, .pdf, or .md</p>
+              </>
+            )}
             <input
               ref={fileRef}
               type="file"
-              accept=".txt,.docx,.md"
+              accept=".txt,.docx,.doc,.md,.pdf"
               className="hidden"
-              onChange={(e) => handleFile(e.target.files?.[0])}
+              onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = '' }}
             />
           </div>
 
@@ -336,7 +354,7 @@ export default function Analyzer() {
           <div className="relative">
             <textarea
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => { setText(e.target.value); if (e.target.value) setUploadedFile(null) }}
               placeholder="Paste your script directly..."
               className="h-48 w-full resize-none rounded-xl border border-border bg-white px-4 py-3 text-sm leading-relaxed text-text-main placeholder:text-text-muted/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
             />
@@ -371,12 +389,12 @@ export default function Analyzer() {
 
           {/* Analyze button */}
           <button
-            onClick={() => handleAnalyze(text)}
-            disabled={loading || text.length < 100}
+            onClick={handleAnalyze}
+            disabled={loading || (!uploadedFile && text.length < 100)}
             className={`mt-6 w-full rounded-xl py-3.5 text-base font-semibold text-white transition-all ${
               loading
                 ? 'btn-shimmer cursor-wait'
-                : text.length < 100
+                : (!uploadedFile && text.length < 100)
                 ? 'cursor-not-allowed bg-primary/40'
                 : 'bg-primary shadow-lg shadow-primary/25 hover:-translate-y-0.5 hover:bg-primary-dark hover:shadow-xl'
             }`}
@@ -390,7 +408,7 @@ export default function Analyzer() {
             )}
           </button>
 
-          {text.length > 0 && text.length < 100 && (
+          {!uploadedFile && text.length > 0 && text.length < 100 && (
             <p className="mt-2 text-center text-xs text-text-muted">
               Minimum 100 characters required ({100 - text.length} more needed)
             </p>

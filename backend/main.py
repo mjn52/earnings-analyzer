@@ -924,13 +924,27 @@ async def analyze(
     transcript = None
     if file is not None:
         raw = await file.read()
-        if file.filename and file.filename.endswith(".docx"):
-            # Handle .docx via python-docx
+        fname = (file.filename or "").lower()
+        if fname.endswith(".docx"):
             import io
             from docx import Document
-
             doc = Document(io.BytesIO(raw))
             transcript = "\n".join(p.text for p in doc.paragraphs)
+        elif fname.endswith(".doc"):
+            # Legacy .doc — try to extract readable text
+            text_content = raw.decode("utf-8", errors="replace")
+            # Strip non-printable characters common in .doc binary format
+            import string
+            transcript = "".join(
+                ch if ch in string.printable else " " for ch in text_content
+            )
+        elif fname.endswith(".pdf"):
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            transcript = "\n".join(
+                page.extract_text() or "" for page in reader.pages
+            )
         else:
             transcript = raw.decode("utf-8", errors="replace")
     elif text:
