@@ -383,7 +383,7 @@ export default function Analyzer() {
           >
             {loading ? (
               <span>
-                {ticker.trim() ? 'Fetching prior calls & analyzing' : 'Analyzing'}<span className="dots"></span>
+                Analyzing<span className="dots"></span>
               </span>
             ) : (
               <>Run Analysis&nbsp;&rarr;</>
