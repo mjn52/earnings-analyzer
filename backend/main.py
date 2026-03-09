@@ -333,6 +333,164 @@ def _generate_rewrite_fallback(sentence: str, issues: list) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Claude-powered negative interpretations + guidance extraction (3rd call)
+# ---------------------------------------------------------------------------
+
+_ANALYSIS_SYSTEM_PROMPT = """You are a senior sell-side equity research analyst who specializes in identifying language in earnings call scripts that could be spun negatively by bearish analysts or short sellers.
+
+You will analyze an earnings call script and provide TWO analyses:
+
+PART 1 — NEGATIVE INTERPRETATIONS:
+Identify 5-15 passages in the script that a bearish analyst could use to build a negative narrative. For each:
+- Quote the problematic text (exact words from the script)
+- Explain how a bear analyst would spin it
+- Suggest a rewrite that neutralizes the negative spin
+- Rate severity: "high" (actively harmful), "medium" (concerning), "low" (minor risk)
+- Categorize: hedging_language, vague_commitments, mixed_messaging, defensiveness, omission_signal, metric_avoidance, blame_shifting, over_promising
+
+PART 2 — GUIDANCE EXTRACTION:
+Extract any forward-looking guidance, outlook, or targets from the script. Only include ACTUAL guidance — where management is providing a forecast or target for a future metric. Do NOT include past results or general commentary.
+For each metric with guidance:
+- Metric name (e.g., "Revenue", "EPS", "Gross Margin")
+- The specific guidance value or range given
+- Whether it's quantified (true = specific number/range, false = directional only like "growth" or "improvement")
+- The exact quote from the script
+
+If NO forward-looking guidance is provided in the script, return an empty array for guidance_metrics.
+
+Return ONLY valid JSON in this exact format (no markdown, no code fences):
+{
+  "negative_interpretations": [
+    {
+      "category": "hedging_language",
+      "original_text": "exact quote from script",
+      "negative_spin": "How a bear analyst would frame this",
+      "suggested_rewrite": "Improved version that neutralizes the spin",
+      "severity": "medium"
+    }
+  ],
+  "guidance_metrics": [
+    {
+      "metric": "Revenue",
+      "value": "$4.2B - $4.4B",
+      "quantified": true,
+      "quote": "We expect revenue in the range of $4.2 billion to $4.4 billion"
+    }
+  ]
+}"""
+
+
+async def _generate_analysis_with_claude(
+    script: str,
+    base_negative_interps: list,
+) -> Optional[dict]:
+    """
+    3rd parallel Claude call: generates context-aware negative interpretations
+    and extracts actual guidance metrics from the script.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        parts = []
+
+        # Include base pattern-matched negative interps as context
+        if base_negative_interps:
+            parts.append("PATTERN-BASED FINDINGS (for context — build on these, don't just repeat them):")
+            for item in base_negative_interps[:10]:
+                parts.append(f"- [{item.get('severity', 'medium')}] \"{item.get('matched_text', '')}\" — {item.get('interpretation', '')}")
+            parts.append("")
+
+        # The script
+        parts.append("EARNINGS CALL SCRIPT:")
+        parts.append("=" * 60)
+        script_words = script.split()
+        if len(script_words) > 8000:
+            parts.append(" ".join(script_words[:8000]))
+            parts.append(f"[...truncated from {len(script_words)} words]")
+        else:
+            parts.append(script)
+        parts.append("=" * 60)
+
+        parts.append("\nAnalyze this script and return negative interpretations + guidance extraction as specified.")
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            system=_ANALYSIS_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": "\n".join(parts)}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Handle markdown code fences
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+            response_text = re.sub(r"\s*```$", "", response_text)
+
+        data = json.loads(response_text)
+
+        neg_interps = data.get("negative_interpretations", [])
+        guidance = data.get("guidance_metrics", [])
+
+        logger.info(f"Claude analysis: {len(neg_interps)} negative interps, {len(guidance)} guidance metrics")
+
+        return {
+            "negative_interpretations": neg_interps,
+            "guidance_metrics": guidance,
+        }
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Claude analysis JSON parse error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Claude analysis generation failed: {type(e).__name__}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# FMP consensus estimates fetch
+# ---------------------------------------------------------------------------
+
+async def _fetch_consensus_estimates(ticker: str) -> Optional[dict]:
+    """Fetch analyst consensus estimates from FMP. Returns None if unavailable."""
+    if not FMP_API_KEY or not ticker:
+        return None
+
+    ticker = ticker.strip().upper()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://financialmodelingprep.com/api/v3/analyst-estimates/{ticker}",
+                params={"apikey": FMP_API_KEY, "limit": 1},
+            )
+            if resp.status_code != 200:
+                logger.warning(f"FMP consensus fetch returned {resp.status_code} for {ticker}")
+                return None
+
+            data = resp.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
+                return None
+
+            est = data[0]
+            return {
+                "revenue": est.get("estimatedRevenueAvg"),
+                "earnings": est.get("estimatedEpsAvg"),
+                "net_income": est.get("estimatedNetIncomeAvg"),
+                "ebitda": est.get("estimatedEbitdaAvg"),
+                "sga": est.get("estimatedSgaExpenseAvg"),
+                "date": est.get("date"),
+                "source": "fmp",
+            }
+    except Exception as e:
+        logger.warning(f"FMP consensus fetch failed for {ticker}: {type(e).__name__}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Mapping helpers — transform existing output into the spec's JSON shape
 # ---------------------------------------------------------------------------
 
@@ -593,13 +751,38 @@ def _build_litigation(advanced: dict) -> dict:
 
 def _build_activist(advanced: dict) -> dict:
     act = advanced.get("activist_triggers", {})
+    raw_triggers = act.get("triggers", [])
+
+    # Map sacred code fields → frontend expected fields
+    mapped = []
+    for t in raw_triggers:
+        category = (t.get("trigger", "") or "").replace("_", " ").title()
+        concern = t.get("concern", "")
+        mapped.append({
+            "category": category,
+            "trigger_type": category,
+            "original_text": t.get("sentence", t.get("matched_text", "")),
+            "matched_text": t.get("matched_text", ""),
+            "activist_narrative": t.get("activist_angle", ""),
+            "defense_suggestion": (
+                f"Consider proactively addressing this by providing specific data points "
+                f"and timeline commitments related to {concern.lower()}."
+                if concern else ""
+            ),
+            "severity": t.get("severity", "medium"),
+        })
+
     return {
         "risk_level": act.get("risk_level", "Low"),
-        "triggers": act.get("triggers", []),
+        "triggers": mapped,
     }
 
 
-def _build_guidance(advanced: dict) -> dict:
+def _build_guidance(
+    advanced: dict,
+    claude_guidance: Optional[list] = None,
+    consensus: Optional[dict] = None,
+) -> dict:
     gc = advanced.get("guidance_clarity", {})
 
     # Flatten signal objects into readable strings for the frontend
@@ -621,15 +804,143 @@ def _build_guidance(advanced: dict) -> dict:
         else:
             neg_signals.append(str(s))
 
-    detail = dict(gc)  # shallow copy so we don't mutate the original
-    detail["positive_signals"] = pos_signals
-    detail["negative_signals"] = neg_signals
+    # Build metrics list from Claude guidance extraction (preferred) or sacred code fallback
+    metrics = []
+    no_guidance_given = False
+
+    if claude_guidance is not None:
+        # Claude extracted actual guidance — use it as the source of truth
+        if len(claude_guidance) == 0:
+            no_guidance_given = True
+        for gm in claude_guidance:
+            metric_name = gm.get("metric", "Unknown")
+            company_value = gm.get("value", "")
+            quantified = gm.get("quantified", False)
+            quote = gm.get("quote", "")
+
+            # Try to match against consensus for status
+            status = "unknown"
+            consensus_value = None
+            if consensus:
+                consensus_value = _match_consensus(metric_name, consensus)
+
+            if consensus_value is not None and quantified and company_value:
+                status = _compare_guidance_to_consensus(company_value, consensus_value, metric_name)
+
+            metrics.append({
+                "metric": metric_name,
+                "company_guidance": company_value if company_value else ("Directional" if not quantified else "—"),
+                "quote": quote,
+                "quantified": quantified,
+                "consensus": _format_consensus(consensus_value, metric_name) if consensus_value is not None else None,
+                "status": status,
+            })
+    else:
+        # Fallback to sacred code metrics
+        for m in gc.get("metrics_covered", []):
+            metric_name = m.get("metric", m) if isinstance(m, dict) else str(m)
+            quantified = m.get("quantified", False) if isinstance(m, dict) else False
+            metrics.append({
+                "metric": metric_name.title(),
+                "company_guidance": "Quantified" if quantified else "Qualitative",
+                "quote": "",
+                "quantified": quantified,
+                "consensus": None,
+                "status": "unknown",
+            })
+        for m in gc.get("metrics_missing", []):
+            metric_name = m.get("metric", m) if isinstance(m, dict) else str(m)
+            metrics.append({
+                "metric": metric_name.title(),
+                "company_guidance": None,
+                "quote": "",
+                "quantified": False,
+                "consensus": None,
+                "status": "missing",
+            })
 
     return {
         "clarity_score": gc.get("clarity_score", 0),
         "grade": _corrected_grade(gc.get("clarity_score", 0)),
-        "detail": detail,
+        "metrics": metrics,
+        "has_consensus": consensus is not None,
+        "no_guidance_given": no_guidance_given,
+        "positive_signals": pos_signals,
+        "negative_signals": neg_signals,
     }
+
+
+def _match_consensus(metric_name: str, consensus: dict) -> Optional[float]:
+    """Match a guidance metric name to the closest FMP consensus field."""
+    name_lower = metric_name.lower()
+    if any(k in name_lower for k in ("revenue", "sales", "top line")):
+        return consensus.get("revenue")
+    if any(k in name_lower for k in ("eps", "earnings per share")):
+        return consensus.get("earnings")
+    if any(k in name_lower for k in ("net income",)):
+        return consensus.get("net_income")
+    if any(k in name_lower for k in ("ebitda",)):
+        return consensus.get("ebitda")
+    return None
+
+
+def _format_consensus(value: Optional[float], metric_name: str) -> str:
+    """Format a consensus value for display."""
+    if value is None:
+        return "N/A"
+    name_lower = metric_name.lower()
+    if any(k in name_lower for k in ("eps", "earnings per share")):
+        return f"${value:.2f}"
+    if value >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.0f}M"
+    return f"${value:,.0f}"
+
+
+def _compare_guidance_to_consensus(guidance_str: str, consensus_val: float, metric_name: str) -> str:
+    """Compare guidance value to consensus. Returns status string."""
+    # Try to extract a numeric value from the guidance string
+    numbers = re.findall(r'[\d,]+\.?\d*', guidance_str.replace(",", ""))
+    if not numbers:
+        return "unknown"
+
+    parsed = []
+    for n in numbers:
+        try:
+            val = float(n)
+            # Handle billions/millions in the original string
+            if "billion" in guidance_str.lower() or "b" in guidance_str.lower():
+                val *= 1_000_000_000
+            elif "million" in guidance_str.lower() or "m" in guidance_str.lower():
+                val *= 1_000_000
+            parsed.append(val)
+        except ValueError:
+            continue
+
+    if not parsed:
+        return "unknown"
+
+    # If it's a range, use the midpoint
+    if len(parsed) >= 2:
+        guidance_val = (parsed[0] + parsed[-1]) / 2
+    else:
+        guidance_val = parsed[0]
+
+    # Normalize: if consensus is in absolute terms and guidance looks like EPS
+    if consensus_val == 0:
+        return "unknown"
+
+    pct_diff = (guidance_val - consensus_val) / abs(consensus_val)
+
+    if pct_diff > 0.02:
+        return "above"
+    elif pct_diff > -0.02:
+        return "inline"
+    elif pct_diff > -0.05:
+        return "low_end"
+    else:
+        return "below"
 
 
 def _build_response(
@@ -639,24 +950,49 @@ def _build_response(
     session_id: str,
     claude_qa: Optional[dict] = None,
     claude_rewrites: Optional[dict] = None,
+    claude_analysis: Optional[dict] = None,
+    consensus: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     flagged_passages = base_analysis.get("flagged_passages", [])
     scores = _corrected_scores(base_analysis)
+
+    # Use Claude negative interps if available, fall back to sacred code pattern matches
+    if claude_analysis and claude_analysis.get("negative_interpretations"):
+        neg_interps = claude_analysis["negative_interpretations"]
+    else:
+        # Map sacred code format to frontend format
+        neg_interps = []
+        for item in advanced.get("negative_interpretations", []):
+            neg_interps.append({
+                "category": item.get("suggestion_type", "awareness"),
+                "original_text": item.get("sentence", item.get("matched_text", "")),
+                "negative_spin": item.get("interpretation", ""),
+                "suggested_rewrite": item.get("rewrite_suggestion"),
+                "severity": item.get("severity", "medium"),
+            })
+
+    # Extract Claude guidance metrics for the guidance builder
+    claude_guidance = None
+    if claude_analysis and "guidance_metrics" in claude_analysis:
+        claude_guidance = claude_analysis["guidance_metrics"]
+
     return {
         "scores": scores,
         "stock_impact": _predict_impact(scores),
         "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites),
         "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
-        "negative_interpretations": advanced.get("negative_interpretations", []),
+        "negative_interpretations": neg_interps,
         "litigation": _build_litigation(advanced),
         "activist_triggers": _build_activist(advanced),
-        "guidance_clarity": _build_guidance(advanced),
+        "guidance_clarity": _build_guidance(advanced, claude_guidance, consensus),
         "session_id": session_id,
         "_debug": {
             "flagged_passage_count": len(flagged_passages),
             "claude_rewrites_is_none": claude_rewrites is None,
             "claude_rewrites_count": len(claude_rewrites) if claude_rewrites else 0,
+            "claude_analysis_available": claude_analysis is not None,
+            "consensus_available": consensus is not None,
         },
     }
 
@@ -665,10 +1001,17 @@ def _build_response(
 # Word export with word-level diffs (replaces sacred export_word)
 # ---------------------------------------------------------------------------
 
-def _export_word_improved(text: str, analysis: dict, output_path: str, claude_rewrites: Optional[dict] = None):
+def _export_word_improved(
+    text: str,
+    analysis: dict,
+    output_path: str,
+    claude_rewrites: Optional[dict] = None,
+    advanced: Optional[dict] = None,
+):
     """
     Word export with word-level diffs instead of full-sentence strikethrough.
     Uses Claude rewrites when available for context-aware suggestions.
+    Includes litigation risk and activist trigger analyses.
     """
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -828,6 +1171,106 @@ def _export_word_improved(text: str, analysis: dict, output_path: str, claude_re
     logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy matches "
                  f"out of {len(sentences)} sentences")
 
+    # --- Litigation Risk Analysis Section ---
+    if advanced:
+        lit = advanced.get("litigation_risk", {})
+        findings = lit.get("findings", [])
+        has_safe_harbor = lit.get("has_safe_harbor", False)
+
+        if findings or not has_safe_harbor:
+            doc.add_paragraph()
+            doc.add_paragraph("\u2500" * 50)
+            doc.add_heading("Litigation Risk Analysis", level=1)
+
+            # Safe harbor status
+            sh_para = doc.add_paragraph()
+            if has_safe_harbor:
+                sh_run = sh_para.add_run("\u2713 Safe Harbor Statement Present")
+                sh_run.font.color.rgb = RGBColor(5, 150, 105)  # success green
+                sh_run.bold = True
+            else:
+                sh_run = sh_para.add_run("\u2717 No Safe Harbor Statement Detected")
+                sh_run.font.color.rgb = RGBColor(220, 38, 38)  # danger red
+                sh_run.bold = True
+                rec = doc.add_paragraph()
+                rec.add_run(
+                    "Recommendation: Add a PSLRA-compliant forward-looking statement disclaimer "
+                    "at the beginning of the prepared remarks."
+                ).font.italic = True
+
+            risk_level = lit.get("risk_level", "Low")
+            risk_score = lit.get("risk_score", 0)
+            doc.add_paragraph(f"Overall Risk: {risk_level} (Score: {risk_score}/100)")
+
+            # Individual findings
+            for f in findings:
+                doc.add_paragraph()
+                issue_para = doc.add_paragraph()
+                issue_run = issue_para.add_run(f.get("issue", "Finding"))
+                issue_run.bold = True
+                severity = f.get("severity", "medium")
+                sev_run = issue_para.add_run(f"  [{severity.upper()}]")
+                sev_run.font.size = Pt(9)
+                sev_run.font.italic = True
+                if severity in ("critical", "high"):
+                    sev_run.font.color.rgb = RGBColor(220, 38, 38)
+                elif severity == "medium":
+                    sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                else:
+                    sev_run.font.color.rgb = RGBColor(107, 114, 128)
+
+                if f.get("detail"):
+                    doc.add_paragraph(f["detail"])
+                if f.get("sentence"):
+                    quote_para = doc.add_paragraph()
+                    quote_run = quote_para.add_run(f'"{f["sentence"]}"')
+                    quote_run.font.italic = True
+                    quote_run.font.color.rgb = RGBColor(107, 114, 128)
+                if f.get("recommendation"):
+                    rec_para = doc.add_paragraph()
+                    rec_para.add_run("Recommendation: ").bold = True
+                    rec_para.add_run(f["recommendation"])
+
+        # --- Activist Vulnerability Analysis Section ---
+        act = advanced.get("activist_triggers", {})
+        triggers = act.get("triggers", [])
+
+        if triggers:
+            doc.add_paragraph()
+            doc.add_paragraph("\u2500" * 50)
+            doc.add_heading("Activist Vulnerability Analysis", level=1)
+
+            risk_level = act.get("risk_level", "Low")
+            doc.add_paragraph(f"Overall Risk: {risk_level}")
+
+            for t in triggers:
+                doc.add_paragraph()
+                trigger_name = (t.get("trigger", "") or "").replace("_", " ").title()
+                t_para = doc.add_paragraph()
+                t_run = t_para.add_run(trigger_name)
+                t_run.bold = True
+                severity = t.get("severity", "medium")
+                sev_run = t_para.add_run(f"  [{severity.upper()}]")
+                sev_run.font.size = Pt(9)
+                sev_run.font.italic = True
+
+                if t.get("sentence"):
+                    quote_para = doc.add_paragraph()
+                    quote_run = quote_para.add_run(f'"{t["sentence"]}"')
+                    quote_run.font.italic = True
+                    quote_run.font.color.rgb = RGBColor(107, 114, 128)
+                if t.get("activist_angle"):
+                    angle_para = doc.add_paragraph()
+                    angle_para.add_run("Activist Narrative: ").bold = True
+                    angle_para.add_run(t["activist_angle"])
+                if t.get("concern"):
+                    def_para = doc.add_paragraph()
+                    def_para.add_run("Defense: ").bold = True
+                    def_para.add_run(
+                        f"Consider proactively addressing this by providing specific data points "
+                        f"and timeline commitments related to {t['concern'].lower()}."
+                    )
+
     doc.save(str(output_path))
     return output_path
 
@@ -954,9 +1397,11 @@ async def analyze(
     # Run all advanced analyses via the wrapper — synchronous, fast
     advanced = run_advanced_analysis(transcript, base_analysis)
 
-    # Fetch prior transcripts + generate Claude Q&A + rewrites (async, parallel)
+    # Fetch prior transcripts + generate Claude Q&A + rewrites + analysis (async, parallel)
     claude_qa = None
     claude_rewrites = None
+    claude_analysis = None
+    consensus = None
     prior_transcripts = []
     if ANTHROPIC_API_KEY:
         logger.info(f"Claude API key present, ticker={ticker}")
@@ -1002,8 +1447,8 @@ async def analyze(
             logger.warning(f"Capping rewrite batch from {len(flagged_for_rewrite)} to 80 sentences")
             flagged_for_rewrite = flagged_for_rewrite[:80]
 
-        # Run Claude Q&A and rewrites IN PARALLEL
-        logger.info("Calling Claude for Q&A + rewrites (parallel)...")
+        # Run Claude Q&A, rewrites, and analysis IN PARALLEL (3 calls)
+        logger.info("Calling Claude for Q&A + rewrites + analysis (parallel)...")
 
         async def _safe_qa():
             try:
@@ -1019,7 +1464,26 @@ async def analyze(
                 logger.error(f"Claude rewrites failed: {type(e).__name__}: {e}")
                 return None
 
-        claude_qa, claude_rewrites = await asyncio.gather(_safe_qa(), _safe_rewrites())
+        async def _safe_analysis():
+            try:
+                base_neg = advanced.get("negative_interpretations", [])
+                return await _generate_analysis_with_claude(transcript, base_neg)
+            except Exception as e:
+                logger.error(f"Claude analysis failed: {type(e).__name__}: {e}")
+                return None
+
+        async def _safe_consensus():
+            try:
+                if ticker and ticker.strip():
+                    return await _fetch_consensus_estimates(ticker.strip())
+                return None
+            except Exception as e:
+                logger.warning(f"Consensus fetch failed: {type(e).__name__}: {e}")
+                return None
+
+        claude_qa, claude_rewrites, claude_analysis, consensus = await asyncio.gather(
+            _safe_qa(), _safe_rewrites(), _safe_analysis(), _safe_consensus()
+        )
 
         if claude_qa:
             logger.info(
@@ -1028,6 +1492,11 @@ async def analyze(
             )
         if claude_rewrites:
             logger.info(f"Claude generated {len(claude_rewrites)} rewrites")
+        if claude_analysis:
+            logger.info(f"Claude analysis: {len(claude_analysis.get('negative_interpretations', []))} neg interps, "
+                         f"{len(claude_analysis.get('guidance_metrics', []))} guidance metrics")
+        if consensus:
+            logger.info(f"FMP consensus available for {ticker}: date={consensus.get('date')}")
     else:
         logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
@@ -1039,9 +1508,14 @@ async def analyze(
         "advanced": advanced,
         "claude_qa": claude_qa,
         "claude_rewrites": claude_rewrites,
+        "claude_analysis": claude_analysis,
+        "consensus": consensus,
     }
 
-    return _build_response(transcript, base_analysis, advanced, session_id, claude_qa, claude_rewrites)
+    return _build_response(
+        transcript, base_analysis, advanced, session_id,
+        claude_qa, claude_rewrites, claude_analysis, consensus,
+    )
 
 
 @app.get("/api/export/pdf/{session_id}")
@@ -1073,6 +1547,7 @@ async def get_word(session_id: str):
         session["base_analysis"],
         tmp.name,
         session.get("claude_rewrites"),
+        session.get("advanced"),
     )
     return FileResponse(
         tmp.name,
@@ -1094,6 +1569,8 @@ async def get_json(session_id: str):
         session_id,
         session.get("claude_qa"),
         session.get("claude_rewrites"),
+        session.get("claude_analysis"),
+        session.get("consensus"),
     )
 
 
