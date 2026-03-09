@@ -25,7 +25,7 @@ function StatusPill({ status }) {
 export default function GuidanceTable({ data }) {
   if (!data) return null
 
-  const { clarity_score, grade, metrics = [], has_consensus, no_guidance_given, positive_signals = [], negative_signals = [] } = data
+  const { clarity_score, grade, metrics = [], has_consensus, no_guidance_given, analysis_source, positive_signals = [], negative_signals = [] } = data
 
   // Backward compat: if data has old `detail` shape, use old format
   const isNewFormat = Array.isArray(metrics)
@@ -34,26 +34,39 @@ export default function GuidanceTable({ data }) {
 
   return (
     <div className="space-y-4">
-      {/* Score badge */}
-      <div className="flex items-center gap-4">
-        <div className="rounded-xl border border-border bg-white px-5 py-3 text-center">
-          <p className={`font-mono text-2xl font-bold ${scoreColor(clarity_score)}`}>{clarity_score}</p>
-          <p className="text-xs text-text-muted">Clarity Score</p>
+      {/* Score badge — only show when we have real data */}
+      {analysis_source === 'claude' && (
+        <div className="flex items-center gap-4">
+          <div className="rounded-xl border border-border bg-white px-5 py-3 text-center">
+            <p className={`font-mono text-2xl font-bold ${scoreColor(clarity_score)}`}>{clarity_score}</p>
+            <p className="text-xs text-text-muted">Clarity Score</p>
+          </div>
+          <div className="rounded-xl border border-border bg-white px-5 py-3 text-center">
+            <p className={`font-sora text-2xl font-bold ${scoreColor(clarity_score)}`}>{grade}</p>
+            <p className="text-xs text-text-muted">Grade</p>
+          </div>
         </div>
-        <div className="rounded-xl border border-border bg-white px-5 py-3 text-center">
-          <p className={`font-sora text-2xl font-bold ${scoreColor(clarity_score)}`}>{grade}</p>
-          <p className="text-xs text-text-muted">Grade</p>
-        </div>
-      </div>
+      )}
 
       {/* No guidance state */}
-      {no_guidance_given && (
+      {no_guidance_given && analysis_source === 'claude' && (
         <div className="rounded-xl border border-border bg-white p-6 text-center">
           <svg className="mx-auto h-8 w-8 text-text-muted" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
           </svg>
           <p className="mt-2 text-sm font-medium text-text-main">No Forward Guidance Provided</p>
           <p className="mt-1 text-xs text-text-muted">This script does not contain specific forward-looking guidance or outlook metrics.</p>
+        </div>
+      )}
+
+      {/* Analysis unavailable state — Claude call failed */}
+      {analysis_source === 'unavailable' && (
+        <div className="rounded-xl border border-border bg-white p-6 text-center">
+          <svg className="mx-auto h-8 w-8 text-text-muted" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+          </svg>
+          <p className="mt-2 text-sm font-medium text-text-main">Guidance Analysis Unavailable</p>
+          <p className="mt-1 text-xs text-text-muted">AI-powered guidance extraction could not complete for this script. Try re-analyzing.</p>
         </div>
       )}
 

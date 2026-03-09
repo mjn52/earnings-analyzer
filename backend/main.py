@@ -338,7 +338,7 @@ def _generate_rewrite_fallback(sentence: str, issues: list) -> str:
 
 _ANALYSIS_SYSTEM_PROMPT = """You are a senior sell-side equity research analyst who specializes in identifying language in earnings call scripts that could be spun negatively by bearish analysts or short sellers.
 
-You will analyze an earnings call script and provide TWO analyses:
+You will analyze an earnings call script and provide FOUR analyses:
 
 PART 1 — NEGATIVE INTERPRETATIONS:
 Identify 5-15 passages in the script that a bearish analyst could use to build a negative narrative. For each:
@@ -349,14 +349,29 @@ Identify 5-15 passages in the script that a bearish analyst could use to build a
 - Categorize: hedging_language, vague_commitments, mixed_messaging, defensiveness, omission_signal, metric_avoidance, blame_shifting, over_promising
 
 PART 2 — GUIDANCE EXTRACTION:
-Extract any forward-looking guidance, outlook, or targets from the script. Only include ACTUAL guidance — where management is providing a forecast or target for a future metric. Do NOT include past results or general commentary.
+Extract any forward-looking guidance, outlook, or targets from the script. Only include ACTUAL guidance — where management explicitly provides a forecast, target, outlook, or range for a future metric. Do NOT include:
+- Past results or historical numbers
+- General commentary like "we're optimistic" without specific targets
+- Analyst questions (only management's stated guidance)
 For each metric with guidance:
-- Metric name (e.g., "Revenue", "EPS", "Gross Margin")
-- The specific guidance value or range given
-- Whether it's quantified (true = specific number/range, false = directional only like "growth" or "improvement")
-- The exact quote from the script
+- Metric name (e.g., "Revenue", "Operating Margin", "Operating Cash Flow", "EPS", "Gross Margin", "CapEx")
+- The specific guidance value or range given (e.g., "$4.2B - $4.4B", "25-27%", "mid-single-digit growth")
+- Whether it's quantified (true = specific number/range/percentage, false = directional only like "growth" or "improvement")
+- The exact quote from the script where this guidance was stated
 
 If NO forward-looking guidance is provided in the script, return an empty array for guidance_metrics.
+
+PART 3 — LITIGATION RISK VALIDATION:
+You will be given a list of pattern-matched litigation risk findings. For each, determine if it's a REAL litigation risk or a false positive. Only keep findings that represent genuine legal exposure risks (securities fraud language, misleading claims, material omissions, regulatory issues). Remove false positives where:
+- The flagged text is actually reasonable/normal business language
+- The "point estimate without range" finding doesn't represent actual forward guidance
+- The finding is about past results, not forward-looking statements
+Return only validated findings with specific, actionable recommendations tied to the actual text.
+
+PART 4 — ACTIVIST TRIGGER VALIDATION:
+You will be given a list of pattern-matched activist vulnerability triggers. For each, determine if it's a REAL activist concern or noise. Only keep triggers that an activist investor would actually seize upon (capital allocation issues, governance concerns, margin underperformance, strategic drift). For each validated trigger:
+- Explain the specific activist narrative
+- Provide a defense suggestion specific to the actual concern
 
 Return ONLY valid JSON in this exact format (no markdown, no code fences):
 {
@@ -376,6 +391,24 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences):
       "quantified": true,
       "quote": "We expect revenue in the range of $4.2 billion to $4.4 billion"
     }
+  ],
+  "litigation_findings": [
+    {
+      "issue": "Specific issue description",
+      "detail": "Why this is a legal risk",
+      "original_text": "exact quote from script",
+      "recommendation": "Specific actionable recommendation tied to this text",
+      "severity": "High"
+    }
+  ],
+  "activist_triggers": [
+    {
+      "category": "Capital Allocation",
+      "original_text": "exact quote from script",
+      "activist_narrative": "How an activist would frame this",
+      "defense_suggestion": "Specific defense for this concern",
+      "severity": "medium"
+    }
   ]
 }"""
 
@@ -383,10 +416,13 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences):
 async def _generate_analysis_with_claude(
     script: str,
     base_negative_interps: list,
+    base_litigation_findings: list = None,
+    base_activist_triggers: list = None,
 ) -> Optional[dict]:
     """
-    3rd parallel Claude call: generates context-aware negative interpretations
-    and extracts actual guidance metrics from the script.
+    3rd parallel Claude call: generates context-aware negative interpretations,
+    extracts actual guidance metrics, validates litigation findings, and
+    validates activist triggers. Claude is the source of truth for all 4 advanced tabs.
     """
     if not ANTHROPIC_API_KEY:
         return None
@@ -398,9 +434,27 @@ async def _generate_analysis_with_claude(
 
         # Include base pattern-matched negative interps as context
         if base_negative_interps:
-            parts.append("PATTERN-BASED FINDINGS (for context — build on these, don't just repeat them):")
+            parts.append("PATTERN-BASED NEGATIVE INTERPRETATION FINDINGS (for context — build on these, don't just repeat them):")
             for item in base_negative_interps[:10]:
                 parts.append(f"- [{item.get('severity', 'medium')}] \"{item.get('matched_text', '')}\" — {item.get('interpretation', '')}")
+            parts.append("")
+
+        # Include base litigation findings for validation
+        if base_litigation_findings:
+            parts.append("PATTERN-BASED LITIGATION RISK FINDINGS (validate these — remove false positives, keep only real risks):")
+            for f in base_litigation_findings[:15]:
+                parts.append(f"- [{f.get('severity', 'Medium')}] {f.get('issue', '')} — \"{f.get('sentence', '')[:150]}\"")
+                if f.get('detail'):
+                    parts.append(f"  Detail: {f.get('detail', '')[:200]}")
+            parts.append("")
+
+        # Include base activist triggers for validation
+        if base_activist_triggers:
+            parts.append("PATTERN-BASED ACTIVIST TRIGGER FINDINGS (validate these — remove noise, keep only real activist concerns):")
+            for t in base_activist_triggers[:15]:
+                parts.append(f"- [{t.get('severity', 'medium')}] {t.get('trigger', '')} — \"{t.get('sentence', '')[:150]}\"")
+                if t.get('concern'):
+                    parts.append(f"  Concern: {t.get('concern', '')[:200]}")
             parts.append("")
 
         # The script
@@ -414,11 +468,11 @@ async def _generate_analysis_with_claude(
             parts.append(script)
         parts.append("=" * 60)
 
-        parts.append("\nAnalyze this script and return negative interpretations + guidance extraction as specified.")
+        parts.append("\nAnalyze this script and return ALL FOUR parts as specified: negative interpretations, guidance extraction, litigation findings validation, and activist trigger validation.")
 
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=6000,
             system=_ANALYSIS_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "\n".join(parts)}],
         )
@@ -434,12 +488,21 @@ async def _generate_analysis_with_claude(
 
         neg_interps = data.get("negative_interpretations", [])
         guidance = data.get("guidance_metrics", [])
+        lit_findings = data.get("litigation_findings", [])
+        activist = data.get("activist_triggers", [])
 
-        logger.info(f"Claude analysis: {len(neg_interps)} negative interps, {len(guidance)} guidance metrics")
+        logger.info(
+            f"Claude analysis: {len(neg_interps)} neg interps, "
+            f"{len(guidance)} guidance metrics, "
+            f"{len(lit_findings)} litigation findings, "
+            f"{len(activist)} activist triggers"
+        )
 
         return {
             "negative_interpretations": neg_interps,
             "guidance_metrics": guidance,
+            "litigation_findings": lit_findings,
+            "activist_triggers": activist,
         }
 
     except json.JSONDecodeError as e:
@@ -739,41 +802,83 @@ async def _generate_qa_with_claude(
         return None
 
 
-def _build_litigation(advanced: dict) -> dict:
+def _build_litigation(advanced: dict, claude_litigation: Optional[list] = None) -> dict:
     lit = advanced.get("litigation_risk", {})
+
+    # Use Claude-validated findings (filtered for real risks) if available
+    if claude_litigation is not None:
+        findings = claude_litigation
+    else:
+        # Fallback to sacred code findings (may contain false positives)
+        findings = lit.get("findings", [])
+
+    # Recalculate risk level based on validated findings
+    if claude_litigation is not None:
+        if len(findings) == 0:
+            risk_level = "Low"
+        elif any(f.get("severity", "").lower() == "high" for f in findings):
+            risk_level = "High"
+        elif len(findings) >= 3:
+            risk_level = "Medium"
+        else:
+            risk_level = "Low"
+    else:
+        risk_level = lit.get("risk_level", "Low")
+
     return {
-        "risk_level": lit.get("risk_level", "Low"),
+        "risk_level": risk_level,
         "risk_score": lit.get("risk_score", 0),
         "has_safe_harbor": lit.get("has_safe_harbor", False),
-        "findings": lit.get("findings", []),
+        "findings": findings,
     }
 
 
-def _build_activist(advanced: dict) -> dict:
+def _build_activist(advanced: dict, claude_activist: Optional[list] = None) -> dict:
     act = advanced.get("activist_triggers", {})
-    raw_triggers = act.get("triggers", [])
 
-    # Map sacred code fields → frontend expected fields
-    mapped = []
-    for t in raw_triggers:
-        category = (t.get("trigger", "") or "").replace("_", " ").title()
-        concern = t.get("concern", "")
-        mapped.append({
-            "category": category,
-            "trigger_type": category,
-            "original_text": t.get("sentence", t.get("matched_text", "")),
-            "matched_text": t.get("matched_text", ""),
-            "activist_narrative": t.get("activist_angle", ""),
-            "defense_suggestion": (
-                f"Consider proactively addressing this by providing specific data points "
-                f"and timeline commitments related to {concern.lower()}."
-                if concern else ""
-            ),
-            "severity": t.get("severity", "medium"),
-        })
+    # Use Claude-validated triggers if available (filtered for real concerns)
+    if claude_activist is not None:
+        # Claude already returns the right format
+        mapped = claude_activist
+    else:
+        # Fallback: map sacred code fields → frontend expected fields
+        raw_triggers = act.get("triggers", [])
+        mapped = []
+        for t in raw_triggers:
+            category = (t.get("trigger", "") or "").replace("_", " ").title()
+            # Skip triggers with empty category — they're noise
+            if not category.strip():
+                continue
+            concern = t.get("concern", "")
+            mapped.append({
+                "category": category,
+                "trigger_type": category,
+                "original_text": t.get("sentence", t.get("matched_text", "")),
+                "matched_text": t.get("matched_text", ""),
+                "activist_narrative": t.get("activist_angle", ""),
+                "defense_suggestion": (
+                    f"Consider proactively addressing this by providing specific data points "
+                    f"and timeline commitments related to {concern.lower()}."
+                    if concern else ""
+                ),
+                "severity": t.get("severity", "medium"),
+            })
+
+    # Recalculate risk level based on validated triggers
+    if claude_activist is not None:
+        if len(mapped) == 0:
+            risk_level = "Low"
+        elif any(t.get("severity", "").lower() == "high" for t in mapped):
+            risk_level = "High"
+        elif len(mapped) >= 3:
+            risk_level = "Medium"
+        else:
+            risk_level = "Low"
+    else:
+        risk_level = act.get("risk_level", "Low")
 
     return {
-        "risk_level": act.get("risk_level", "Low"),
+        "risk_level": risk_level,
         "triggers": mapped,
     }
 
@@ -804,7 +909,7 @@ def _build_guidance(
         else:
             neg_signals.append(str(s))
 
-    # Build metrics list from Claude guidance extraction (preferred) or sacred code fallback
+    # Build metrics list from Claude guidance extraction (preferred) or fallback
     metrics = []
     no_guidance_given = False
 
@@ -835,36 +940,28 @@ def _build_guidance(
                 "consensus": _format_consensus(consensus_value, metric_name) if consensus_value is not None else None,
                 "status": status,
             })
+
+        # Recalculate clarity score based on Claude's actual findings
+        quantified_count = sum(1 for m in metrics if m.get("quantified"))
+        total_metrics = len(metrics)
+        if total_metrics == 0:
+            clarity_score = 20  # No guidance = low score
+        else:
+            # Base: 40 for having any guidance, +10 per quantified metric (up to 60 bonus)
+            clarity_score = min(100, 40 + (quantified_count * 10))
     else:
-        # Fallback to sacred code metrics
-        for m in gc.get("metrics_covered", []):
-            metric_name = m.get("metric", m) if isinstance(m, dict) else str(m)
-            quantified = m.get("quantified", False) if isinstance(m, dict) else False
-            metrics.append({
-                "metric": metric_name.title(),
-                "company_guidance": "Quantified" if quantified else "Qualitative",
-                "quote": "",
-                "quantified": quantified,
-                "consensus": None,
-                "status": "unknown",
-            })
-        for m in gc.get("metrics_missing", []):
-            metric_name = m.get("metric", m) if isinstance(m, dict) else str(m)
-            metrics.append({
-                "metric": metric_name.title(),
-                "company_guidance": None,
-                "quote": "",
-                "quantified": False,
-                "consensus": None,
-                "status": "missing",
-            })
+        # Fallback: no Claude data available — show honest "analysis unavailable" state
+        # Don't show sacred code's false-positive-prone regex metrics
+        clarity_score = gc.get("clarity_score", 0)
+        no_guidance_given = True  # Signal to frontend to show empty state
 
     return {
-        "clarity_score": gc.get("clarity_score", 0),
-        "grade": _corrected_grade(gc.get("clarity_score", 0)),
+        "clarity_score": clarity_score if claude_guidance is not None else gc.get("clarity_score", 0),
+        "grade": _corrected_grade(clarity_score if claude_guidance is not None else gc.get("clarity_score", 0)),
         "metrics": metrics,
         "has_consensus": consensus is not None,
         "no_guidance_given": no_guidance_given,
+        "analysis_source": "claude" if claude_guidance is not None else "unavailable",
         "positive_signals": pos_signals,
         "negative_signals": neg_signals,
     }
@@ -972,10 +1069,17 @@ def _build_response(
                 "severity": item.get("severity", "medium"),
             })
 
-    # Extract Claude guidance metrics for the guidance builder
+    # Extract Claude sub-analyses for downstream builders
     claude_guidance = None
-    if claude_analysis and "guidance_metrics" in claude_analysis:
-        claude_guidance = claude_analysis["guidance_metrics"]
+    claude_litigation = None
+    claude_activist = None
+    if claude_analysis:
+        if "guidance_metrics" in claude_analysis:
+            claude_guidance = claude_analysis["guidance_metrics"]
+        if "litigation_findings" in claude_analysis:
+            claude_litigation = claude_analysis["litigation_findings"]
+        if "activist_triggers" in claude_analysis:
+            claude_activist = claude_analysis["activist_triggers"]
 
     return {
         "scores": scores,
@@ -983,8 +1087,8 @@ def _build_response(
         "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites),
         "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
         "negative_interpretations": neg_interps,
-        "litigation": _build_litigation(advanced),
-        "activist_triggers": _build_activist(advanced),
+        "litigation": _build_litigation(advanced, claude_litigation),
+        "activist_triggers": _build_activist(advanced, claude_activist),
         "guidance_clarity": _build_guidance(advanced, claude_guidance, consensus),
         "session_id": session_id,
         "_debug": {
@@ -992,6 +1096,10 @@ def _build_response(
             "claude_rewrites_is_none": claude_rewrites is None,
             "claude_rewrites_count": len(claude_rewrites) if claude_rewrites else 0,
             "claude_analysis_available": claude_analysis is not None,
+            "claude_analysis_parts": list(claude_analysis.keys()) if claude_analysis else [],
+            "claude_guidance_count": len(claude_guidance) if claude_guidance else 0,
+            "claude_litigation_count": len(claude_litigation) if claude_litigation else 0,
+            "claude_activist_count": len(claude_activist) if claude_activist else 0,
             "consensus_available": consensus is not None,
         },
     }
@@ -1007,11 +1115,12 @@ def _export_word_improved(
     output_path: str,
     claude_rewrites: Optional[dict] = None,
     advanced: Optional[dict] = None,
+    claude_analysis: Optional[dict] = None,
 ):
     """
     Word export with word-level diffs instead of full-sentence strikethrough.
     Uses Claude rewrites when available for context-aware suggestions.
-    Includes litigation risk and activist trigger analyses.
+    Includes litigation risk and activist trigger analyses (Claude-validated when available).
     """
     from docx import Document
     from docx.shared import Pt, RGBColor
@@ -1174,8 +1283,13 @@ def _export_word_improved(
     # --- Litigation Risk Analysis Section ---
     if advanced:
         lit = advanced.get("litigation_risk", {})
-        findings = lit.get("findings", [])
         has_safe_harbor = lit.get("has_safe_harbor", False)
+
+        # Use Claude-validated findings when available (filters false positives)
+        if claude_analysis and "litigation_findings" in claude_analysis:
+            findings = claude_analysis["litigation_findings"]
+        else:
+            findings = lit.get("findings", [])
 
         if findings or not has_safe_harbor:
             doc.add_paragraph()
@@ -1198,9 +1312,18 @@ def _export_word_improved(
                     "at the beginning of the prepared remarks."
                 ).font.italic = True
 
-            risk_level = lit.get("risk_level", "Low")
-            risk_score = lit.get("risk_score", 0)
-            doc.add_paragraph(f"Overall Risk: {risk_level} (Score: {risk_score}/100)")
+            # Calculate risk level based on validated findings
+            if findings:
+                if any(f.get("severity", "").lower() in ("high", "critical") for f in findings):
+                    risk_level = "High"
+                elif len(findings) >= 3:
+                    risk_level = "Medium"
+                else:
+                    risk_level = "Low"
+            else:
+                risk_level = "Low"
+
+            doc.add_paragraph(f"Overall Risk: {risk_level}")
 
             # Individual findings
             for f in findings:
@@ -1212,18 +1335,20 @@ def _export_word_improved(
                 sev_run = issue_para.add_run(f"  [{severity.upper()}]")
                 sev_run.font.size = Pt(9)
                 sev_run.font.italic = True
-                if severity in ("critical", "high"):
+                if severity.lower() in ("critical", "high"):
                     sev_run.font.color.rgb = RGBColor(220, 38, 38)
-                elif severity == "medium":
+                elif severity.lower() == "medium":
                     sev_run.font.color.rgb = RGBColor(217, 119, 6)
                 else:
                     sev_run.font.color.rgb = RGBColor(107, 114, 128)
 
                 if f.get("detail"):
                     doc.add_paragraph(f["detail"])
-                if f.get("sentence"):
+                # Support both sacred code "sentence" and Claude "original_text" fields
+                quote_text = f.get("original_text") or f.get("sentence")
+                if quote_text:
                     quote_para = doc.add_paragraph()
-                    quote_run = quote_para.add_run(f'"{f["sentence"]}"')
+                    quote_run = quote_para.add_run(f'"{quote_text}"')
                     quote_run.font.italic = True
                     quote_run.font.color.rgb = RGBColor(107, 114, 128)
                 if f.get("recommendation"):
@@ -1232,20 +1357,47 @@ def _export_word_improved(
                     rec_para.add_run(f["recommendation"])
 
         # --- Activist Vulnerability Analysis Section ---
-        act = advanced.get("activist_triggers", {})
-        triggers = act.get("triggers", [])
+        # Use Claude-validated triggers when available
+        if claude_analysis and "activist_triggers" in claude_analysis:
+            activist_triggers = claude_analysis["activist_triggers"]
+        else:
+            act = advanced.get("activist_triggers", {})
+            raw_triggers = act.get("triggers", [])
+            # Map sacred code fields for the Word export
+            activist_triggers = []
+            for t in raw_triggers:
+                category = (t.get("trigger", "") or "").replace("_", " ").title()
+                if not category.strip():
+                    continue  # Skip empty triggers
+                activist_triggers.append({
+                    "category": category,
+                    "original_text": t.get("sentence", t.get("matched_text", "")),
+                    "activist_narrative": t.get("activist_angle", ""),
+                    "defense_suggestion": (
+                        f"Consider proactively addressing this by providing specific data points "
+                        f"and timeline commitments related to {t.get('concern', '').lower()}."
+                        if t.get("concern") else ""
+                    ),
+                    "severity": t.get("severity", "medium"),
+                })
 
-        if triggers:
+        if activist_triggers:
             doc.add_paragraph()
             doc.add_paragraph("\u2500" * 50)
             doc.add_heading("Activist Vulnerability Analysis", level=1)
 
-            risk_level = act.get("risk_level", "Low")
+            # Calculate risk level
+            if any(t.get("severity", "").lower() == "high" for t in activist_triggers):
+                risk_level = "High"
+            elif len(activist_triggers) >= 3:
+                risk_level = "Medium"
+            else:
+                risk_level = "Low"
             doc.add_paragraph(f"Overall Risk: {risk_level}")
 
-            for t in triggers:
+            for t in activist_triggers:
                 doc.add_paragraph()
-                trigger_name = (t.get("trigger", "") or "").replace("_", " ").title()
+                trigger_name = t.get("category", "Trigger")
                 t_para = doc.add_paragraph()
                 t_run = t_para.add_run(trigger_name)
                 t_run.bold = True
@@ -1254,22 +1406,19 @@ def _export_word_improved(
                 sev_run.font.size = Pt(9)
                 sev_run.font.italic = True
 
-                if t.get("sentence"):
+                if t.get("original_text"):
                     quote_para = doc.add_paragraph()
-                    quote_run = quote_para.add_run(f'"{t["sentence"]}"')
+                    quote_run = quote_para.add_run(f'"{t["original_text"]}"')
                     quote_run.font.italic = True
                     quote_run.font.color.rgb = RGBColor(107, 114, 128)
-                if t.get("activist_angle"):
+                if t.get("activist_narrative"):
                     angle_para = doc.add_paragraph()
                     angle_para.add_run("Activist Narrative: ").bold = True
-                    angle_para.add_run(t["activist_angle"])
-                if t.get("concern"):
+                    angle_para.add_run(t["activist_narrative"])
+                if t.get("defense_suggestion"):
                     def_para = doc.add_paragraph()
                     def_para.add_run("Defense: ").bold = True
-                    def_para.add_run(
-                        f"Consider proactively addressing this by providing specific data points "
-                        f"and timeline commitments related to {t['concern'].lower()}."
-                    )
+                    def_para.add_run(t["defense_suggestion"])
 
     doc.save(str(output_path))
     return output_path
@@ -1467,7 +1616,11 @@ async def analyze(
         async def _safe_analysis():
             try:
                 base_neg = advanced.get("negative_interpretations", [])
-                return await _generate_analysis_with_claude(transcript, base_neg)
+                base_lit = advanced.get("litigation_risk", {}).get("findings", [])
+                base_act = advanced.get("activist_triggers", {}).get("triggers", [])
+                return await _generate_analysis_with_claude(
+                    transcript, base_neg, base_lit, base_act
+                )
             except Exception as e:
                 logger.error(f"Claude analysis failed: {type(e).__name__}: {e}")
                 return None
@@ -1548,6 +1701,7 @@ async def get_word(session_id: str):
         tmp.name,
         session.get("claude_rewrites"),
         session.get("advanced"),
+        session.get("claude_analysis"),
     )
     return FileResponse(
         tmp.name,
