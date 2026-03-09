@@ -2,6 +2,7 @@ import { useState, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import ScoreRing from '../components/ScoreRing'
 import ScoreCard from '../components/ScoreCard'
+import StockImpact from '../components/StockImpact'
 import FlaggedIssue from '../components/FlaggedIssue'
 import AnalystQA from '../components/AnalystQA'
 import LitigationPanel from '../components/LitigationPanel'
@@ -191,7 +192,7 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, guidance_clarity, session_id } = results
+    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, guidance_clarity, session_id } = results
 
     const tabCounts = {
       flagged: flagged_issues?.length || 0,
@@ -228,6 +229,9 @@ export default function Analyzer() {
               <ScoreCard key={dim} dimension={dim} score={scores[dim]} />
             ))}
           </div>
+
+          {/* Stock Impact Prediction */}
+          <StockImpact data={stock_impact} />
 
           {/* Tab Navigation */}
           <div className="mt-10 flex gap-1 overflow-x-auto border-b border-border">
