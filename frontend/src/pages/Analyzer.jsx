@@ -6,7 +6,6 @@ import StockImpact from '../components/StockImpact'
 import FlaggedIssue from '../components/FlaggedIssue'
 import AnalystQA from '../components/AnalystQA'
 import LitigationPanel from '../components/LitigationPanel'
-import GuidanceTable from '../components/GuidanceTable'
 import ExportButtons from '../components/ExportButtons'
 
 /* ------------------------------------------------------------------ */
@@ -57,6 +56,20 @@ function ActivistTab({ data }) {
 /*  Negative Interpretations tab                                       */
 /* ------------------------------------------------------------------ */
 
+const CATEGORY_LABELS = {
+  hedging_language: 'Hedging Language',
+  vague_commitments: 'Vague Commitments',
+  mixed_messaging: 'Mixed Messaging',
+  defensiveness: 'Defensiveness',
+  omission_signal: 'Omission Signal',
+  metric_avoidance: 'Metric Avoidance',
+  blame_shifting: 'Blame Shifting',
+  over_promising: 'Over-Promising',
+  vague_guidance: 'Vague Guidance',
+  missing_guidance: 'Missing Guidance',
+  guidance_gap: 'Guidance Gap',
+}
+
 function NegativeInterpTab({ items }) {
   if (!items || items.length === 0) {
     return <p className="py-8 text-center text-sm text-text-muted">No negative interpretations found.</p>
@@ -77,8 +90,8 @@ function NegativeInterpTab({ items }) {
         >
           <div className="flex items-center gap-2">
             {item.category && (
-              <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium uppercase tracking-wide text-text-muted">
-                {item.category}
+              <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium tracking-wide text-text-muted">
+                {CATEGORY_LABELS[item.category] || item.category.replace(/_/g, ' ')}
               </span>
             )}
             {(item.severity || item.risk_level) && (
@@ -116,7 +129,6 @@ const TABS = [
   { key: 'negative', label: 'Negative Interpretations' },
   { key: 'litigation', label: 'Litigation Risk' },
   { key: 'activist', label: 'Activist Triggers' },
-  { key: 'guidance', label: 'Guidance Clarity' },
 ]
 
 export default function Analyzer() {
@@ -197,7 +209,7 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, guidance_clarity, session_id } = results
+    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, session_id } = results
 
     const tabCounts = {
       flagged: flagged_issues?.length || 0,
@@ -276,7 +288,6 @@ export default function Analyzer() {
             {activeTab === 'negative' && <NegativeInterpTab items={negative_interpretations} />}
             {activeTab === 'litigation' && <LitigationPanel data={litigation} />}
             {activeTab === 'activist' && <ActivistTab data={activist_triggers} />}
-            {activeTab === 'guidance' && <GuidanceTable data={guidance_clarity} />}
           </div>
         </main>
       </div>

@@ -346,7 +346,7 @@ Identify 5-15 passages in the script that a bearish analyst could use to build a
 - Explain how a bear analyst would spin it
 - Suggest a rewrite that neutralizes the negative spin
 - Rate severity: "high" (actively harmful), "medium" (concerning), "low" (minor risk)
-- Categorize: hedging_language, vague_commitments, mixed_messaging, defensiveness, omission_signal, metric_avoidance, blame_shifting, over_promising
+- Categorize: hedging_language, vague_commitments, mixed_messaging, defensiveness, omission_signal, metric_avoidance, blame_shifting, over_promising, vague_guidance, missing_guidance, guidance_gap
 
 PART 2 — GUIDANCE EXTRACTION:
 Extract any forward-looking guidance, outlook, or targets from the script. Only include ACTUAL guidance — where management explicitly provides a forecast, target, outlook, or range for a future metric. Do NOT include:
@@ -360,6 +360,13 @@ For each metric with guidance:
 - The exact quote from the script where this guidance was stated
 
 If NO forward-looking guidance is provided in the script, return an empty array for guidance_metrics.
+
+IMPORTANT — GUIDANCE-INFORMED NEGATIVE INTERPRETATIONS:
+After extracting guidance metrics above, use that analysis to generate ADDITIONAL negative interpretations in PART 1 with these categories:
+- "vague_guidance": Flag any guidance that uses hedging language ("we anticipate", "approximately", "in the neighborhood of") instead of specific ranges or numbers. Quote the vague language and explain how a sophisticated analyst would press for specifics.
+- "missing_guidance": Identify key financial metrics where analysts would expect forward guidance but the script provides NONE (e.g., revenue, margins, EPS, CapEx, free cash flow). Explain what would be conspicuously absent to a buy-side analyst.
+- "guidance_gap": Flag guidance with unusually wide ranges, lack of year-over-year comparison, or purely directional language ("improvement", "growth") without quantifying. Explain how this creates uncertainty that the market will discount.
+These guidance-related findings MUST appear as entries in the "negative_interpretations" array with the appropriate category. Do not put them in guidance_metrics.
 
 PART 3 — LITIGATION RISK VALIDATION:
 You will be given a list of pattern-matched litigation risk findings. For each, determine if it's a REAL litigation risk or a false positive. Only keep findings that represent genuine legal exposure risks (securities fraud language, misleading claims, material omissions, regulatory issues). Remove false positives where:
@@ -658,6 +665,9 @@ QUESTION GUIDELINES:
 - Probe hedging language, vague promises, or evasive areas
 - Ask about topics conspicuously absent from the prepared remarks
 - Challenge overly optimistic framing with requests for specifics
+- Identify metrics where forward guidance is conspicuously absent or vague — probe for specific numbers, ranges, and timelines
+- If guidance uses hedging language ("approximately", "in the neighborhood of") without specific ranges, ask for quantification
+- Compare any stated guidance against what a sophisticated analyst would expect — ask about guidance relative to prior period performance or prior commitments
 - Each question should feel like it comes from a real analyst who does this for a living
 
 ANSWER GUIDELINES:
