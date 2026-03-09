@@ -670,11 +670,20 @@ QUESTION GUIDELINES:
 - Compare any stated guidance against what a sophisticated analyst would expect — ask about guidance relative to prior period performance or prior commitments
 - Each question should feel like it comes from a real analyst who does this for a living
 
+PRIOR CALL Q&A ANALYSIS (critical when prior transcripts are available):
+- Pay close attention to the Q&A sections of prior earnings calls — these are the questions analysts ACTUALLY asked
+- Identify questions where management gave evasive, deflective, or incomplete answers — analysts WILL follow up on these
+- Track specific commitments management made in prior Q&A responses (timelines, targets, milestones) — ask about their status
+- Note recurring analyst concerns across multiple quarters — persistent themes signal unresolved issues the Street cares about
+- If management promised to "provide more detail next quarter" or "get back to you on that," hold them to it
+- Identify metrics or topics analysts probed in prior Q&A that are NOT addressed in the current prepared remarks — these will be asked again
+
 ANSWER GUIDELINES:
 - Responses should be what a well-prepared IR/management team would say
 - Be direct, confident, and data-driven — avoid corporate waffle
 - Reference specific metrics, timelines, and commitments where possible
 - Flag areas where management should have data ready but shouldn't speculate
+- When prior Q&A is available, proactively address known analyst concerns rather than waiting to be asked
 
 Return ONLY valid JSON in this exact format (no markdown, no code fences):
 {
@@ -754,8 +763,10 @@ async def _generate_qa_with_claude(
         parts.append("")
         if prior_transcripts:
             parts.append(
-                f"You have {len(prior_transcripts)} prior call transcripts above. "
-                "Reference specific prior commitments, guidance changes, and analyst concerns from those calls."
+                f"You have {len(prior_transcripts)} prior call transcripts above (including their Q&A sections). "
+                "Reference specific prior commitments, guidance changes, and analyst concerns from those calls. "
+                "Pay special attention to the Q&A sections — identify questions analysts asked that management "
+                "deflected or gave incomplete answers to, and commitments that need follow-up this quarter."
             )
         else:
             parts.append(
@@ -1050,6 +1061,73 @@ def _compare_guidance_to_consensus(guidance_str: str, consensus_val: float, metr
         return "below"
 
 
+def _build_consensus_divergence_interps(
+    claude_guidance: Optional[list],
+    consensus: Optional[dict],
+) -> list:
+    """
+    Compare Claude-extracted guidance against FMP consensus estimates.
+    Returns negative interpretation entries for any meaningful divergence.
+    """
+    if not claude_guidance or not consensus:
+        return []
+
+    interps = []
+    for gm in claude_guidance:
+        metric_name = gm.get("metric", "")
+        value_str = gm.get("value", "")
+        quantified = gm.get("quantified", False)
+        quote = gm.get("quote", "")
+
+        if not quantified or not value_str:
+            continue
+
+        consensus_val = _match_consensus(metric_name, consensus)
+        if consensus_val is None:
+            continue
+
+        status = _compare_guidance_to_consensus(value_str, consensus_val, metric_name)
+        consensus_formatted = _format_consensus(consensus_val, metric_name)
+
+        if status == "below":
+            interps.append({
+                "category": "consensus_divergence",
+                "original_text": quote or f"{metric_name} guidance: {value_str}",
+                "negative_spin": (
+                    f"{metric_name} guidance of {value_str} is meaningfully below "
+                    f"Street consensus of {consensus_formatted}. Analysts will view this as "
+                    f"a guide-down and press for the drivers behind the shortfall. "
+                    f"Expect pointed questions on what changed since the prior quarter."
+                ),
+                "suggested_rewrite": (
+                    f"Provide context for the {metric_name} outlook — explain what headwinds "
+                    f"are being incorporated and frame it as prudent conservatism rather than "
+                    f"deteriorating fundamentals. Consider adding bridge items that show a path "
+                    f"back toward consensus."
+                ),
+                "severity": "high",
+            })
+        elif status == "low_end":
+            interps.append({
+                "category": "consensus_divergence",
+                "original_text": quote or f"{metric_name} guidance: {value_str}",
+                "negative_spin": (
+                    f"{metric_name} guidance of {value_str} is at the low end of "
+                    f"Street consensus ({consensus_formatted}). While not a clear miss, "
+                    f"analysts will note the lack of upside and may interpret this as "
+                    f"sandbagging or underlying weakness."
+                ),
+                "suggested_rewrite": (
+                    f"Acknowledge the conservative posture on {metric_name} and provide "
+                    f"specific catalysts or upside drivers that could move the number higher. "
+                    f"Frame the range as achievable with clear line of sight."
+                ),
+                "severity": "medium",
+            })
+
+    return interps
+
+
 def _build_response(
     text: str,
     base_analysis: dict,
@@ -1090,6 +1168,12 @@ def _build_response(
             claude_litigation = claude_analysis["litigation_findings"]
         if "activist_triggers" in claude_analysis:
             claude_activist = claude_analysis["activist_triggers"]
+
+    # Inject consensus divergence findings into negative interpretations
+    consensus_interps = _build_consensus_divergence_interps(claude_guidance, consensus)
+    if consensus_interps:
+        neg_interps = neg_interps + consensus_interps
+        logger.info(f"Added {len(consensus_interps)} consensus divergence neg interps")
 
     return {
         "scores": scores,

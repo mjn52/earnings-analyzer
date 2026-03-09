@@ -68,6 +68,7 @@ const CATEGORY_LABELS = {
   vague_guidance: 'Vague Guidance',
   missing_guidance: 'Missing Guidance',
   guidance_gap: 'Guidance Gap',
+  consensus_divergence: 'vs. Consensus',
 }
 
 function NegativeInterpTab({ items }) {
