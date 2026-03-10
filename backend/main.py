@@ -374,11 +374,13 @@ You will be given a list of pattern-matched litigation risk findings. For each, 
 - The "point estimate without range" finding doesn't represent actual forward guidance
 - The finding is about past results, not forward-looking statements
 Return only validated findings with specific, actionable recommendations tied to the actual text.
+CRITICAL: For each validated finding, you MUST provide a "suggested_rewrite" — a revised version of the original_text that mitigates the legal risk while preserving the intended business message. This rewrite will appear as tracked changes in the Word document.
 
 PART 4 — ACTIVIST TRIGGER VALIDATION:
 You will be given a list of pattern-matched activist vulnerability triggers. For each, determine if it's a REAL activist concern or noise. Only keep triggers that an activist investor would actually seize upon (capital allocation issues, governance concerns, margin underperformance, strategic drift). For each validated trigger:
 - Explain the specific activist narrative
 - Provide a defense suggestion specific to the actual concern
+CRITICAL: For each validated trigger, you MUST provide a "suggested_rewrite" — a revised version of the original_text that defuses the activist concern while preserving the intended business message. This rewrite will appear as tracked changes in the Word document.
 
 Return ONLY valid JSON in this exact format (no markdown, no code fences):
 {
@@ -404,6 +406,7 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences):
       "issue": "Specific issue description",
       "detail": "Why this is a legal risk",
       "original_text": "exact quote from script",
+      "suggested_rewrite": "Revised text that mitigates the legal risk",
       "recommendation": "Specific actionable recommendation tied to this text",
       "severity": "High"
     }
@@ -412,6 +415,7 @@ Return ONLY valid JSON in this exact format (no markdown, no code fences):
     {
       "category": "Capital Allocation",
       "original_text": "exact quote from script",
+      "suggested_rewrite": "Revised text that defuses the activist concern",
       "activist_narrative": "How an activist would frame this",
       "defense_suggestion": "Specific defense for this concern",
       "severity": "medium"
@@ -1279,9 +1283,45 @@ def _export_word_improved(
                 _passage_rewrites[norm_key] = rewrite
                 _extra_from_claude += 1
 
+    # Merge litigation/activist rewrites into the same pipeline so they
+    # render as inline track changes instead of standalone sections.
+    # Track annotation source for each rewrite so we can label them.
+    _rewrite_annotations = {}  # norm_key → annotation string
+
+    _lit_merged = 0
+    _act_merged = 0
+
+    if claude_analysis and "litigation_findings" in claude_analysis:
+        for f in claude_analysis["litigation_findings"]:
+            orig = f.get("original_text", "")
+            rewrite = f.get("suggested_rewrite", "")
+            if orig and rewrite and rewrite != orig:
+                norm_key = ' '.join(orig.split())
+                _passage_rewrites[norm_key] = rewrite
+                severity = f.get("severity", "medium").upper()
+                issue = f.get("issue", "Litigation Risk")
+                _rewrite_annotations[norm_key] = f"Litigation: {issue} [{severity}]"
+                _lit_merged += 1
+
+    if claude_analysis and "activist_triggers" in claude_analysis:
+        for t in claude_analysis["activist_triggers"]:
+            orig = t.get("original_text", "")
+            rewrite = t.get("suggested_rewrite", "")
+            if orig and rewrite and rewrite != orig:
+                norm_key = ' '.join(orig.split())
+                # Don't overwrite a litigation rewrite (higher priority)
+                if norm_key not in _passage_rewrites:
+                    _passage_rewrites[norm_key] = rewrite
+                if norm_key not in _rewrite_annotations:
+                    severity = t.get("severity", "medium").upper()
+                    category = t.get("category", "Activist Vulnerability")
+                    _rewrite_annotations[norm_key] = f"Activist: {category} [{severity}]"
+                _act_merged += 1
+
     logger.info(f"Word export: {_flagged_count} flagged passages, "
                  f"{len(_passage_rewrites)} with rewrites "
-                 f"({_extra_from_claude} extra from classify_sentence via claude_rewrites), "
+                 f"({_extra_from_claude} extra from classify_sentence via claude_rewrites, "
+                 f"{_lit_merged} litigation, {_act_merged} activist), "
                  f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
@@ -1298,14 +1338,19 @@ def _export_word_improved(
         # Step 1: Try normalized exact match
         norm_sentence = ' '.join(sentence.split())
         rewrite = _passage_rewrites.get(norm_sentence)
+        matched_key = norm_sentence if rewrite else None
 
         if rewrite:
             _exact_hits += 1
-        elif color in ("RED", "YELLOW") and _passage_rewrites:
+        elif _passage_rewrites and (color in ("RED", "YELLOW") or _rewrite_annotations):
             # Step 2: Fuzzy match — sentence boundaries from regex splitter
-            # may differ from sacred code's splitter
+            # may differ from sacred code's splitter.
+            # Also runs for GREEN/NEUTRAL sentences when litigation/activist
+            # rewrites exist, since those quotes may not be flagged by
+            # classify_sentence().
             best_ratio = 0
             best_rw = None
+            best_key = None
             for key, rw in _passage_rewrites.items():
                 if abs(len(key) - len(norm_sentence)) > 30:
                     continue
@@ -1313,14 +1358,21 @@ def _export_word_improved(
                 if ratio > best_ratio:
                     best_ratio = ratio
                     best_rw = rw
+                    best_key = key
             if best_ratio > 0.8:
                 rewrite = best_rw
+                matched_key = best_key
                 _fuzzy_hits += 1
 
         if not rewrite or rewrite == sentence:
             rewrite = _generate_rewrite_fallback(sentence, issues)
 
         para = doc.add_paragraph()
+
+        # Look up litigation/activist annotation for this sentence
+        annotation = None
+        if matched_key:
+            annotation = _rewrite_annotations.get(matched_key)
 
         if rewrite and rewrite != sentence:
             # Word-level diff
@@ -1336,7 +1388,7 @@ def _export_word_improved(
                     old_run = para.add_run(" ".join(orig_words[i1:i2]) + " ")
                     old_run.font.strike = True
                     old_run.font.color.rgb = RGBColor(180, 0, 0)
-                    # Green underline the new words
+                    # Blue underline the new words
                     new_run = para.add_run(" ".join(new_words[j1:j2]) + " ")
                     new_run.font.underline = True
                     new_run.font.color.rgb = RGBColor(26, 86, 219)
@@ -1349,8 +1401,14 @@ def _export_word_improved(
                     new_run.font.underline = True
                     new_run.font.color.rgb = RGBColor(26, 86, 219)
 
+            # Build annotation label from issues + litigation/activist source
+            labels = []
             if issues:
-                comment = para.add_run("  [" + ", ".join(issues) + "]")
+                labels.extend(issues)
+            if annotation:
+                labels.append(annotation)
+            if labels:
+                comment = para.add_run("  [" + ", ".join(labels) + "]")
                 comment.font.size = Pt(8)
                 comment.font.italic = True
                 comment.font.color.rgb = RGBColor(128, 128, 128)
@@ -1374,12 +1432,13 @@ def _export_word_improved(
     logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy matches "
                  f"out of {len(sentences)} sentences")
 
-    # --- Litigation Risk Analysis Section ---
+    # --- Litigation Risk Analysis Summary ---
+    # Full rewrites are now inline as track changes above; this section
+    # provides only the risk-level overview and safe-harbor status.
     if advanced:
         lit = advanced.get("litigation_risk", {})
         has_safe_harbor = lit.get("has_safe_harbor", False)
 
-        # Use Claude-validated findings when available (filters false positives)
         if claude_analysis and "litigation_findings" in claude_analysis:
             findings = claude_analysis["litigation_findings"]
         else:
@@ -1388,17 +1447,21 @@ def _export_word_improved(
         if findings or not has_safe_harbor:
             doc.add_paragraph()
             doc.add_paragraph("\u2500" * 50)
-            doc.add_heading("Litigation Risk Analysis", level=1)
+            doc.add_heading("Litigation Risk Summary", level=1)
+            doc.add_paragraph(
+                "Specific revisions for litigation risk items appear as "
+                "tracked changes in the script above."
+            ).italic = True
 
             # Safe harbor status
             sh_para = doc.add_paragraph()
             if has_safe_harbor:
                 sh_run = sh_para.add_run("\u2713 Safe Harbor Statement Present")
-                sh_run.font.color.rgb = RGBColor(5, 150, 105)  # success green
+                sh_run.font.color.rgb = RGBColor(5, 150, 105)
                 sh_run.bold = True
             else:
                 sh_run = sh_para.add_run("\u2717 No Safe Harbor Statement Detected")
-                sh_run.font.color.rgb = RGBColor(220, 38, 38)  # danger red
+                sh_run.font.color.rgb = RGBColor(220, 38, 38)
                 sh_run.bold = True
                 rec = doc.add_paragraph()
                 rec.add_run(
@@ -1406,7 +1469,7 @@ def _export_word_improved(
                     "at the beginning of the prepared remarks."
                 ).font.italic = True
 
-            # Calculate risk level based on validated findings
+            # Risk level
             if findings:
                 if any(f.get("severity", "").lower() in ("high", "critical") for f in findings):
                     risk_level = "High"
@@ -1416,103 +1479,72 @@ def _export_word_improved(
                     risk_level = "Low"
             else:
                 risk_level = "Low"
+            doc.add_paragraph(f"Overall Risk: {risk_level}  ({len(findings)} finding{'s' if len(findings) != 1 else ''})")
 
-            doc.add_paragraph(f"Overall Risk: {risk_level}")
-
-            # Individual findings
+            # Compact bullet list of issues
             for f in findings:
-                doc.add_paragraph()
-                issue_para = doc.add_paragraph()
-                issue_run = issue_para.add_run(f.get("issue", "Finding"))
-                issue_run.bold = True
-                severity = f.get("severity", "medium")
-                sev_run = issue_para.add_run(f"  [{severity.upper()}]")
+                severity = f.get("severity", "medium").upper()
+                issue = f.get("issue", "Finding")
+                bullet = doc.add_paragraph(style="List Bullet")
+                sev_run = bullet.add_run(f"[{severity}] ")
                 sev_run.font.size = Pt(9)
-                sev_run.font.italic = True
-                if severity.lower() in ("critical", "high"):
+                if severity in ("CRITICAL", "HIGH"):
                     sev_run.font.color.rgb = RGBColor(220, 38, 38)
-                elif severity.lower() == "medium":
+                elif severity == "MEDIUM":
                     sev_run.font.color.rgb = RGBColor(217, 119, 6)
                 else:
                     sev_run.font.color.rgb = RGBColor(107, 114, 128)
+                bullet.add_run(issue)
 
-                if f.get("detail"):
-                    doc.add_paragraph(f["detail"])
-                # Support both sacred code "sentence" and Claude "original_text" fields
-                quote_text = f.get("original_text") or f.get("sentence")
-                if quote_text:
-                    quote_para = doc.add_paragraph()
-                    quote_run = quote_para.add_run(f'"{quote_text}"')
-                    quote_run.font.italic = True
-                    quote_run.font.color.rgb = RGBColor(107, 114, 128)
-                if f.get("recommendation"):
-                    rec_para = doc.add_paragraph()
-                    rec_para.add_run("Recommendation: ").bold = True
-                    rec_para.add_run(f["recommendation"])
-
-        # --- Activist Vulnerability Analysis Section ---
-        # Use Claude-validated triggers when available
+        # --- Activist Vulnerability Summary ---
         if claude_analysis and "activist_triggers" in claude_analysis:
             activist_triggers = claude_analysis["activist_triggers"]
         else:
             act = advanced.get("activist_triggers", {})
             raw_triggers = act.get("triggers", [])
-            # Map sacred code fields for the Word export
             activist_triggers = []
             for t in raw_triggers:
                 category = (t.get("trigger", "") or "").replace("_", " ").title()
                 if not category.strip():
-                    continue  # Skip empty triggers
+                    continue
                 activist_triggers.append({
                     "category": category,
                     "original_text": t.get("sentence", t.get("matched_text", "")),
-                    "activist_narrative": t.get("activist_angle", ""),
-                    "defense_suggestion": (
-                        f"Consider proactively addressing this by providing specific data points "
-                        f"and timeline commitments related to {t.get('concern', '').lower()}."
-                        if t.get("concern") else ""
-                    ),
                     "severity": t.get("severity", "medium"),
                 })
 
         if activist_triggers:
             doc.add_paragraph()
             doc.add_paragraph("\u2500" * 50)
-            doc.add_heading("Activist Vulnerability Analysis", level=1)
+            doc.add_heading("Activist Vulnerability Summary", level=1)
+            doc.add_paragraph(
+                "Specific revisions for activist vulnerability items appear as "
+                "tracked changes in the script above."
+            ).italic = True
 
-            # Calculate risk level
+            # Risk level
             if any(t.get("severity", "").lower() == "high" for t in activist_triggers):
                 risk_level = "High"
             elif len(activist_triggers) >= 3:
                 risk_level = "Medium"
             else:
                 risk_level = "Low"
-            doc.add_paragraph(f"Overall Risk: {risk_level}")
+            doc.add_paragraph(f"Overall Risk: {risk_level}  ({len(activist_triggers)} trigger{'s' if len(activist_triggers) != 1 else ''})")
 
+            # Compact bullet list of triggers
             for t in activist_triggers:
-                doc.add_paragraph()
-                trigger_name = t.get("category", "Trigger")
-                t_para = doc.add_paragraph()
-                t_run = t_para.add_run(trigger_name)
-                t_run.bold = True
-                severity = t.get("severity", "medium")
-                sev_run = t_para.add_run(f"  [{severity.upper()}]")
+                severity = t.get("severity", "medium").upper()
+                category = t.get("category", "Trigger")
+                bullet = doc.add_paragraph(style="List Bullet")
+                sev_run = bullet.add_run(f"[{severity}] ")
                 sev_run.font.size = Pt(9)
-                sev_run.font.italic = True
-
-                if t.get("original_text"):
-                    quote_para = doc.add_paragraph()
-                    quote_run = quote_para.add_run(f'"{t["original_text"]}"')
-                    quote_run.font.italic = True
-                    quote_run.font.color.rgb = RGBColor(107, 114, 128)
-                if t.get("activist_narrative"):
-                    angle_para = doc.add_paragraph()
-                    angle_para.add_run("Activist Narrative: ").bold = True
-                    angle_para.add_run(t["activist_narrative"])
-                if t.get("defense_suggestion"):
-                    def_para = doc.add_paragraph()
-                    def_para.add_run("Defense: ").bold = True
-                    def_para.add_run(t["defense_suggestion"])
+                if severity == "HIGH":
+                    sev_run.font.color.rgb = RGBColor(220, 38, 38)
+                elif severity == "MEDIUM":
+                    sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                else:
+                    sev_run.font.color.rgb = RGBColor(107, 114, 128)
+                bullet.add_run(category)
 
     doc.save(str(output_path))
     return output_path
