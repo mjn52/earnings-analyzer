@@ -1283,13 +1283,28 @@ def _export_word_improved(
                 _passage_rewrites[norm_key] = rewrite
                 _extra_from_claude += 1
 
-    # Merge litigation/activist rewrites into the same pipeline so they
-    # render as inline track changes instead of standalone sections.
+    # Merge negative-interpretation / litigation / activist rewrites into
+    # the same pipeline so they all render as inline track changes.
     # Track annotation source for each rewrite so we can label them.
     _rewrite_annotations = {}  # norm_key → annotation string
 
+    _neg_merged = 0
     _lit_merged = 0
     _act_merged = 0
+
+    if claude_analysis and "negative_interpretations" in claude_analysis:
+        for ni in claude_analysis["negative_interpretations"]:
+            orig = ni.get("original_text", "")
+            rewrite = ni.get("suggested_rewrite", "")
+            if orig and rewrite and rewrite != orig:
+                norm_key = ' '.join(orig.split())
+                # Only add if not already covered by flagged_passages / claude_rewrites
+                if norm_key not in _passage_rewrites:
+                    _passage_rewrites[norm_key] = rewrite
+                    _neg_merged += 1
+                category = ni.get("category", "negative interpretation").replace("_", " ").title()
+                severity = ni.get("severity", "medium").upper()
+                _rewrite_annotations[norm_key] = f"Neg Interp: {category} [{severity}]"
 
     if claude_analysis and "litigation_findings" in claude_analysis:
         for f in claude_analysis["litigation_findings"]:
@@ -1321,7 +1336,7 @@ def _export_word_improved(
     logger.info(f"Word export: {_flagged_count} flagged passages, "
                  f"{len(_passage_rewrites)} with rewrites "
                  f"({_extra_from_claude} extra from classify_sentence via claude_rewrites, "
-                 f"{_lit_merged} litigation, {_act_merged} activist), "
+                 f"{_neg_merged} neg interps, {_lit_merged} litigation, {_act_merged} activist), "
                  f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
