@@ -1292,6 +1292,10 @@ def _export_word_improved(
     _lit_merged = 0
     _act_merged = 0
 
+    # Track all advanced rewrites separately so we can render unmatched
+    # ones in dedicated fallback sections at the end of the document.
+    _advanced_rewrites = []  # list of (source, orig, rewrite, annotation, item_dict)
+
     if claude_analysis and "negative_interpretations" in claude_analysis:
         for ni in claude_analysis["negative_interpretations"]:
             orig = ni.get("original_text", "")
@@ -1304,7 +1308,9 @@ def _export_word_improved(
                     _neg_merged += 1
                 category = ni.get("category", "negative interpretation").replace("_", " ").title()
                 severity = ni.get("severity", "medium").upper()
-                _rewrite_annotations[norm_key] = f"Neg Interp: {category} [{severity}]"
+                annotation = f"Neg Interp: {category} [{severity}]"
+                _rewrite_annotations[norm_key] = annotation
+                _advanced_rewrites.append(("neg_interp", orig, rewrite, annotation, ni))
 
     if claude_analysis and "litigation_findings" in claude_analysis:
         for f in claude_analysis["litigation_findings"]:
@@ -1315,8 +1321,10 @@ def _export_word_improved(
                 _passage_rewrites[norm_key] = rewrite
                 severity = f.get("severity", "medium").upper()
                 issue = f.get("issue", "Litigation Risk")
-                _rewrite_annotations[norm_key] = f"Litigation: {issue} [{severity}]"
+                annotation = f"Litigation: {issue} [{severity}]"
+                _rewrite_annotations[norm_key] = annotation
                 _lit_merged += 1
+                _advanced_rewrites.append(("litigation", orig, rewrite, annotation, f))
 
     if claude_analysis and "activist_triggers" in claude_analysis:
         for t in claude_analysis["activist_triggers"]:
@@ -1330,8 +1338,12 @@ def _export_word_improved(
                 if norm_key not in _rewrite_annotations:
                     severity = t.get("severity", "medium").upper()
                     category = t.get("category", "Activist Vulnerability")
-                    _rewrite_annotations[norm_key] = f"Activist: {category} [{severity}]"
+                    annotation = f"Activist: {category} [{severity}]"
+                    _rewrite_annotations[norm_key] = annotation
+                else:
+                    annotation = _rewrite_annotations[norm_key]
                 _act_merged += 1
+                _advanced_rewrites.append(("activist", orig, rewrite, annotation, t))
 
     logger.info(f"Word export: {_flagged_count} flagged passages, "
                  f"{len(_passage_rewrites)} with rewrites "
@@ -1343,6 +1355,7 @@ def _export_word_improved(
     sentences = re.split(r"(?<=[.!?])\s+", text)
     _exact_hits = 0
     _fuzzy_hits = 0
+    _matched_advanced_keys = set()  # Track which advanced rewrite keys matched inline
 
     for sentence in sentences:
         if len(sentence.strip()) < 10:
@@ -1367,9 +1380,16 @@ def _export_word_improved(
             best_rw = None
             best_key = None
             for key, rw in _passage_rewrites.items():
-                if abs(len(key) - len(norm_sentence)) > 30:
+                # Step 2a: Check substring containment — Claude's original_text
+                # may span multiple sentences. If the current sentence is
+                # contained within a multi-sentence key, it's a match.
+                if len(key) > len(norm_sentence) + 10 and norm_sentence in key:
+                    # Sentence is part of a multi-sentence original_text
+                    ratio = 0.95
+                elif abs(len(key) - len(norm_sentence)) > 30:
                     continue
-                ratio = difflib.SequenceMatcher(None, norm_sentence, key).ratio()
+                else:
+                    ratio = difflib.SequenceMatcher(None, norm_sentence, key).ratio()
                 if ratio > best_ratio:
                     best_ratio = ratio
                     best_rw = rw
@@ -1388,6 +1408,8 @@ def _export_word_improved(
         annotation = None
         if matched_key:
             annotation = _rewrite_annotations.get(matched_key)
+            if annotation:
+                _matched_advanced_keys.add(matched_key)
 
         if rewrite and rewrite != sentence:
             # Word-level diff
@@ -1445,11 +1467,97 @@ def _export_word_improved(
         para.add_run(" ")
 
     logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy matches "
-                 f"out of {len(sentences)} sentences")
+                 f"out of {len(sentences)} sentences, "
+                 f"{len(_matched_advanced_keys)} advanced rewrites matched inline")
+
+    # Helper: render a single rewrite item with track-changes formatting
+    def _render_rewrite_item(doc, orig_text, rewrite_text, label):
+        """Render original → rewrite with word-level diffs in the document."""
+        para = doc.add_paragraph()
+        # Label
+        lbl_run = para.add_run(f"[{label}]  ")
+        lbl_run.font.size = Pt(9)
+        lbl_run.font.bold = True
+        lbl_run.font.color.rgb = RGBColor(128, 128, 128)
+
+        # Word-level diff
+        orig_words = orig_text.split()
+        new_words = rewrite_text.split()
+        matcher = difflib.SequenceMatcher(None, orig_words, new_words)
+
+        for op, i1, i2, j1, j2 in matcher.get_opcodes():
+            if op == "equal":
+                para.add_run(" ".join(orig_words[i1:i2]) + " ")
+            elif op == "replace":
+                old_run = para.add_run(" ".join(orig_words[i1:i2]) + " ")
+                old_run.font.strike = True
+                old_run.font.color.rgb = RGBColor(180, 0, 0)
+                new_run = para.add_run(" ".join(new_words[j1:j2]) + " ")
+                new_run.font.underline = True
+                new_run.font.color.rgb = RGBColor(26, 86, 219)
+            elif op == "delete":
+                old_run = para.add_run(" ".join(orig_words[i1:i2]) + " ")
+                old_run.font.strike = True
+                old_run.font.color.rgb = RGBColor(180, 0, 0)
+            elif op == "insert":
+                new_run = para.add_run(" ".join(new_words[j1:j2]) + " ")
+                new_run.font.underline = True
+                new_run.font.color.rgb = RGBColor(26, 86, 219)
+        doc.add_paragraph()  # spacer
+
+    # Collect unmatched advanced rewrites by source
+    _unmatched_neg = []
+    _unmatched_lit = []
+    _unmatched_act = []
+    for source, orig, rewrite, annotation, item in _advanced_rewrites:
+        norm_key = ' '.join(orig.split())
+        if norm_key not in _matched_advanced_keys:
+            if source == "neg_interp":
+                _unmatched_neg.append((orig, rewrite, annotation, item))
+            elif source == "litigation":
+                _unmatched_lit.append((orig, rewrite, annotation, item))
+            elif source == "activist":
+                _unmatched_act.append((orig, rewrite, annotation, item))
+
+    # --- Negative Interpretation Rewrites ---
+    neg_interps_all = claude_analysis.get("negative_interpretations", []) if claude_analysis else []
+    if neg_interps_all:
+        doc.add_paragraph()
+        doc.add_paragraph("\u2500" * 50)
+        doc.add_heading("Negative Interpretation Rewrites", level=1)
+        doc.add_paragraph(
+            "Passages that bearish analysts could spin negatively, with suggested rewrites."
+        ).italic = True
+        doc.add_paragraph()
+
+        for ni in neg_interps_all:
+            orig = ni.get("original_text", "")
+            rewrite = ni.get("suggested_rewrite", "")
+            category = ni.get("category", "negative interpretation").replace("_", " ").title()
+            severity = ni.get("severity", "medium").upper()
+            neg_spin = ni.get("negative_spin", "")
+
+            if orig and rewrite and rewrite != orig:
+                _render_rewrite_item(doc, orig, rewrite, f"Neg Interp: {category} [{severity}]")
+            elif orig:
+                # No rewrite but still show the flagged passage
+                para = doc.add_paragraph()
+                lbl_run = para.add_run(f"[{category} — {severity}]  ")
+                lbl_run.font.size = Pt(9)
+                lbl_run.font.bold = True
+                lbl_run.font.color.rgb = RGBColor(128, 128, 128)
+                run = para.add_run(orig)
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+                doc.add_paragraph()
+
+            if neg_spin:
+                spin_para = doc.add_paragraph()
+                spin_run = spin_para.add_run(f"Bear narrative: {neg_spin}")
+                spin_run.font.size = Pt(9)
+                spin_run.font.italic = True
+                spin_run.font.color.rgb = RGBColor(128, 128, 128)
 
     # --- Litigation Risk Analysis Summary ---
-    # Full rewrites are now inline as track changes above; this section
-    # provides only the risk-level overview and safe-harbor status.
     if advanced:
         lit = advanced.get("litigation_risk", {})
         has_safe_harbor = lit.get("has_safe_harbor", False)
@@ -1463,10 +1571,6 @@ def _export_word_improved(
             doc.add_paragraph()
             doc.add_paragraph("\u2500" * 50)
             doc.add_heading("Litigation Risk Summary", level=1)
-            doc.add_paragraph(
-                "Specific revisions for litigation risk items appear as "
-                "tracked changes in the script above."
-            ).italic = True
 
             # Safe harbor status
             sh_para = doc.add_paragraph()
@@ -1495,21 +1599,34 @@ def _export_word_improved(
             else:
                 risk_level = "Low"
             doc.add_paragraph(f"Overall Risk: {risk_level}  ({len(findings)} finding{'s' if len(findings) != 1 else ''})")
+            doc.add_paragraph()
 
-            # Compact bullet list of issues
+            # Show each finding with its rewrite
             for f in findings:
                 severity = f.get("severity", "medium").upper()
                 issue = f.get("issue", "Finding")
-                bullet = doc.add_paragraph(style="List Bullet")
-                sev_run = bullet.add_run(f"[{severity}] ")
-                sev_run.font.size = Pt(9)
-                if severity in ("CRITICAL", "HIGH"):
-                    sev_run.font.color.rgb = RGBColor(220, 38, 38)
-                elif severity == "MEDIUM":
-                    sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                orig = f.get("original_text", "")
+                rewrite = f.get("suggested_rewrite", "")
+
+                if orig and rewrite and rewrite != orig:
+                    _render_rewrite_item(doc, orig, rewrite, f"Litigation: {issue} [{severity}]")
                 else:
-                    sev_run.font.color.rgb = RGBColor(107, 114, 128)
-                bullet.add_run(issue)
+                    # No rewrite — just show the finding as a bullet
+                    bullet = doc.add_paragraph(style="List Bullet")
+                    sev_run = bullet.add_run(f"[{severity}] ")
+                    sev_run.font.size = Pt(9)
+                    if severity in ("CRITICAL", "HIGH"):
+                        sev_run.font.color.rgb = RGBColor(220, 38, 38)
+                    elif severity == "MEDIUM":
+                        sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                    else:
+                        sev_run.font.color.rgb = RGBColor(107, 114, 128)
+                    bullet.add_run(issue)
+                    if orig:
+                        quote_para = doc.add_paragraph()
+                        quote_run = quote_para.add_run(f'"{orig}"')
+                        quote_run.font.italic = True
+                        quote_run.font.size = Pt(9)
 
         # --- Activist Vulnerability Summary ---
         if claude_analysis and "activist_triggers" in claude_analysis:
@@ -1532,10 +1649,6 @@ def _export_word_improved(
             doc.add_paragraph()
             doc.add_paragraph("\u2500" * 50)
             doc.add_heading("Activist Vulnerability Summary", level=1)
-            doc.add_paragraph(
-                "Specific revisions for activist vulnerability items appear as "
-                "tracked changes in the script above."
-            ).italic = True
 
             # Risk level
             if any(t.get("severity", "").lower() == "high" for t in activist_triggers):
@@ -1545,21 +1658,41 @@ def _export_word_improved(
             else:
                 risk_level = "Low"
             doc.add_paragraph(f"Overall Risk: {risk_level}  ({len(activist_triggers)} trigger{'s' if len(activist_triggers) != 1 else ''})")
+            doc.add_paragraph()
 
-            # Compact bullet list of triggers
+            # Show each trigger with its rewrite
             for t in activist_triggers:
                 severity = t.get("severity", "medium").upper()
                 category = t.get("category", "Trigger")
-                bullet = doc.add_paragraph(style="List Bullet")
-                sev_run = bullet.add_run(f"[{severity}] ")
-                sev_run.font.size = Pt(9)
-                if severity == "HIGH":
-                    sev_run.font.color.rgb = RGBColor(220, 38, 38)
-                elif severity == "MEDIUM":
-                    sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                orig = t.get("original_text", "")
+                rewrite = t.get("suggested_rewrite", "")
+
+                if orig and rewrite and rewrite != orig:
+                    _render_rewrite_item(doc, orig, rewrite, f"Activist: {category} [{severity}]")
                 else:
-                    sev_run.font.color.rgb = RGBColor(107, 114, 128)
-                bullet.add_run(category)
+                    # No rewrite — show the trigger as a bullet
+                    bullet = doc.add_paragraph(style="List Bullet")
+                    sev_run = bullet.add_run(f"[{severity}] ")
+                    sev_run.font.size = Pt(9)
+                    if severity == "HIGH":
+                        sev_run.font.color.rgb = RGBColor(220, 38, 38)
+                    elif severity == "MEDIUM":
+                        sev_run.font.color.rgb = RGBColor(217, 119, 6)
+                    else:
+                        sev_run.font.color.rgb = RGBColor(107, 114, 128)
+                    bullet.add_run(category)
+                    if orig:
+                        quote_para = doc.add_paragraph()
+                        quote_run = quote_para.add_run(f'"{orig}"')
+                        quote_run.font.italic = True
+                        quote_run.font.size = Pt(9)
+                    narrative = t.get("activist_narrative", "")
+                    if narrative:
+                        narr_para = doc.add_paragraph()
+                        narr_run = narr_para.add_run(f"Activist narrative: {narrative}")
+                        narr_run.font.size = Pt(9)
+                        narr_run.font.italic = True
+                        narr_run.font.color.rgb = RGBColor(128, 128, 128)
 
     doc.save(str(output_path))
     return output_path
