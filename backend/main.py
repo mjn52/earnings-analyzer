@@ -1906,6 +1906,58 @@ async def health():
     }
 
 
+@app.get("/api/test-fmp/{ticker}")
+async def test_fmp(ticker: str):
+    """Diagnostic: test FMP API connectivity for a ticker."""
+    if not FMP_API_KEY:
+        return {"status": "error", "detail": "FMP_API_KEY not set"}
+
+    ticker = ticker.strip().upper()
+    results = {}
+
+    # Test transcript endpoint
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}",
+                params={"quarter": 4, "year": 2025, "apikey": FMP_API_KEY},
+            )
+            results["transcript_status"] = resp.status_code
+            results["transcript_response_length"] = len(resp.text)
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                results["transcript_found"] = True
+                results["transcript_content_length"] = len(data[0].get("content", ""))
+            elif isinstance(data, dict) and "Error Message" in str(data):
+                results["transcript_found"] = False
+                results["transcript_error"] = str(data)[:200]
+            else:
+                results["transcript_found"] = False
+                results["transcript_raw"] = str(data)[:200]
+    except Exception as e:
+        results["transcript_error"] = f"{type(e).__name__}: {e}"
+
+    # Test peers endpoint
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://financialmodelingprep.com/api/v4/stock_peers",
+                params={"symbol": ticker, "apikey": FMP_API_KEY},
+            )
+            results["peers_status"] = resp.status_code
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                results["peers_found"] = data[0].get("peersList", [])[:5]
+            elif isinstance(data, dict):
+                results["peers_error"] = str(data)[:200]
+            else:
+                results["peers_raw"] = str(data)[:200]
+    except Exception as e:
+        results["peers_error"] = f"{type(e).__name__}: {e}"
+
+    return {"status": "ok", "ticker": ticker, **results}
+
+
 @app.get("/api/test-claude")
 async def test_claude():
     """Test Claude API connectivity — makes a tiny call to verify the key works."""
