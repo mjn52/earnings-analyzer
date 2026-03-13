@@ -1442,6 +1442,7 @@ def _export_word_improved(
     _exact_hits = 0
     _fuzzy_hits = 0
     _matched_advanced_keys = set()  # Track which advanced rewrite keys matched inline
+    _inline_rendered = {}  # norm_key -> [(actual_sentence, actual_rewrite)] for summary consistency
 
     for sentence in sentences:
         if len(sentence.strip()) < 10:
@@ -1496,6 +1497,10 @@ def _export_word_improved(
             annotation = _rewrite_annotations.get(matched_key)
             if annotation:
                 _matched_advanced_keys.add(matched_key)
+                # Track the actual sentence + rewrite used inline so summary
+                # sections render the exact same diff as the script body.
+                if rewrite and rewrite != sentence:
+                    _inline_rendered.setdefault(matched_key, []).append((sentence, rewrite))
 
         if rewrite and rewrite != sentence:
             # Word-level diff
@@ -1622,9 +1627,16 @@ def _export_word_improved(
             category = ni.get("category", "negative interpretation").replace("_", " ").title()
             severity = ni.get("severity", "medium").upper()
             neg_spin = ni.get("negative_spin", "")
+            label = f"Neg Interp: {category} [{severity}]"
 
             if orig and rewrite and rewrite != orig:
-                _render_rewrite_item(doc, orig, rewrite, f"Neg Interp: {category} [{severity}]")
+                norm_key = ' '.join(orig.split())
+                if norm_key in _inline_rendered:
+                    # Use exact sentence + rewrite from the script body
+                    for actual_sentence, actual_rewrite in _inline_rendered[norm_key]:
+                        _render_rewrite_item(doc, actual_sentence, actual_rewrite, label)
+                else:
+                    _render_rewrite_item(doc, orig, rewrite, label)
             elif orig:
                 # No rewrite but still show the flagged passage
                 para = doc.add_paragraph()
@@ -1693,9 +1705,15 @@ def _export_word_improved(
                 issue = f.get("issue", "Finding")
                 orig = f.get("original_text", "")
                 rewrite = f.get("suggested_rewrite", "")
+                label = f"Litigation: {issue} [{severity}]"
 
                 if orig and rewrite and rewrite != orig:
-                    _render_rewrite_item(doc, orig, rewrite, f"Litigation: {issue} [{severity}]")
+                    norm_key = ' '.join(orig.split())
+                    if norm_key in _inline_rendered:
+                        for actual_sentence, actual_rewrite in _inline_rendered[norm_key]:
+                            _render_rewrite_item(doc, actual_sentence, actual_rewrite, label)
+                    else:
+                        _render_rewrite_item(doc, orig, rewrite, label)
                 else:
                     # No rewrite — just show the finding as a bullet
                     bullet = doc.add_paragraph(style="List Bullet")
@@ -1752,9 +1770,15 @@ def _export_word_improved(
                 category = t.get("category", "Trigger")
                 orig = t.get("original_text", "")
                 rewrite = t.get("suggested_rewrite", "")
+                label = f"Activist: {category} [{severity}]"
 
                 if orig and rewrite and rewrite != orig:
-                    _render_rewrite_item(doc, orig, rewrite, f"Activist: {category} [{severity}]")
+                    norm_key = ' '.join(orig.split())
+                    if norm_key in _inline_rendered:
+                        for actual_sentence, actual_rewrite in _inline_rendered[norm_key]:
+                            _render_rewrite_item(doc, actual_sentence, actual_rewrite, label)
+                    else:
+                        _render_rewrite_item(doc, orig, rewrite, label)
                 else:
                     # No rewrite — show the trigger as a bullet
                     bullet = doc.add_paragraph(style="List Bullet")
