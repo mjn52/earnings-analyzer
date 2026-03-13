@@ -1441,6 +1441,7 @@ def _export_word_improved(
     sentences = re.split(r"(?<=[.!?])\s+", text)
     _exact_hits = 0
     _fuzzy_hits = 0
+    _word_overlap_hits = 0
     _matched_advanced_keys = set()  # Track which advanced rewrite keys matched inline
     _inline_rendered = {}  # norm_key -> [(actual_sentence, actual_rewrite)] for summary consistency
 
@@ -1485,6 +1486,36 @@ def _export_word_improved(
                 rewrite = best_rw
                 matched_key = best_key
                 _fuzzy_hits += 1
+
+        # Step 3: Word-overlap match against advanced rewrite originals.
+        # Handles character encoding differences (smart quotes, em-dashes)
+        # and cases where the fuzzy length threshold (30 chars) skips the key.
+        if (not rewrite or rewrite == sentence) and _advanced_rewrites:
+            sent_words = norm_sentence.lower().split()
+            if len(sent_words) >= 3:
+                best_adv_ratio = 0
+                best_adv_rw = None
+                best_adv_key = None
+                for _src, adv_orig, adv_rw, _ann, _item in _advanced_rewrites:
+                    adv_norm = ' '.join(adv_orig.split())
+                    adv_word_set = set(adv_norm.lower().split())
+                    # Sentence must be ≥70% of original word count to prevent
+                    # matching a single sentence against a multi-sentence original.
+                    if len(sent_words) < len(adv_word_set) * 0.7:
+                        continue
+                    matching = sum(1 for w in sent_words if w in adv_word_set)
+                    overlap = matching / len(sent_words)
+                    if overlap > best_adv_ratio:
+                        best_adv_ratio = overlap
+                        best_adv_rw = adv_rw
+                        best_adv_key = adv_norm
+                if best_adv_ratio > 0.8:
+                    rewrite = best_adv_rw
+                    matched_key = best_adv_key
+                    _word_overlap_hits += 1
+                    # Ensure key is in _passage_rewrites for tracking
+                    if best_adv_key not in _passage_rewrites:
+                        _passage_rewrites[best_adv_key] = best_adv_rw
 
         if not rewrite or rewrite == sentence:
             rewrite = _generate_rewrite_fallback(sentence, issues)
@@ -1557,8 +1588,8 @@ def _export_word_improved(
 
         para.add_run(" ")
 
-    logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy matches "
-                 f"out of {len(sentences)} sentences, "
+    logger.info(f"Word export complete: {_exact_hits} exact + {_fuzzy_hits} fuzzy + "
+                 f"{_word_overlap_hits} word-overlap matches out of {len(sentences)} sentences, "
                  f"{len(_matched_advanced_keys)} advanced rewrites matched inline")
 
     # Helper: render a single rewrite item with track-changes formatting
