@@ -656,6 +656,59 @@ async def _fetch_prior_transcripts(ticker: str, num_quarters: int = 4) -> List[d
 
 
 # ---------------------------------------------------------------------------
+# Peer group comparison
+# ---------------------------------------------------------------------------
+
+async def _fetch_peer_tickers(ticker: str, max_peers: int = 8) -> List[str]:
+    """Fetch peer company tickers from FMP stock peers endpoint."""
+    if not FMP_API_KEY or not ticker:
+        return []
+
+    ticker = ticker.strip().upper()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://financialmodelingprep.com/api/v4/stock_peers",
+                params={"symbol": ticker, "apikey": FMP_API_KEY},
+            )
+            if resp.status_code != 200:
+                logger.warning(f"FMP peer fetch returned {resp.status_code} for {ticker}")
+                return []
+
+            data = resp.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
+                return []
+
+            peers = data[0].get("peersList", [])
+            # Filter out the ticker itself and cap
+            peers = [p for p in peers if p.upper() != ticker][:max_peers]
+            return peers
+    except Exception as e:
+        logger.warning(f"FMP peer fetch failed for {ticker}: {type(e).__name__}: {e}")
+        return []
+
+
+async def _score_peer(ticker: str) -> Optional[dict]:
+    """Fetch the most recent transcript for a peer and score it."""
+    try:
+        transcripts = await _fetch_prior_transcripts(ticker, num_quarters=1)
+        if not transcripts:
+            return None
+
+        content = transcripts[0]["content"]
+        base = analyze_transcript(content, LM_DICT)
+        scores = _corrected_scores(base)
+        return {
+            "ticker": ticker.upper(),
+            "quarter": transcripts[0]["quarter"],
+            "scores": scores,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to score peer {ticker}: {type(e).__name__}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Claude-powered analyst Q&A generation
 # ---------------------------------------------------------------------------
 
@@ -1132,6 +1185,31 @@ def _build_consensus_divergence_interps(
     return interps
 
 
+def _build_prior_comparison(current_scores: dict, prior_scores: list) -> Optional[dict]:
+    """Build prior call comparison data from scored prior transcripts."""
+    if not prior_scores:
+        return None
+
+    result = {"prior_scores": prior_scores}
+
+    # Delta vs most recent prior quarter
+    most_recent = prior_scores[0]
+    dims = ["overall", "sentiment", "confidence", "ownership", "clarity", "red_flags"]
+    dimension_deltas = {}
+    for d in dims:
+        cur = current_scores.get(d, 0)
+        prev = most_recent["scores"].get(d, 0)
+        dimension_deltas[d] = cur - prev
+
+    result["vs_prior"] = {
+        "quarter": most_recent["quarter"],
+        "overall_delta": dimension_deltas["overall"],
+        "dimension_deltas": {k: v for k, v in dimension_deltas.items() if k != "overall"},
+    }
+
+    return result
+
+
 def _build_response(
     text: str,
     base_analysis: dict,
@@ -1141,6 +1219,7 @@ def _build_response(
     claude_rewrites: Optional[dict] = None,
     claude_analysis: Optional[dict] = None,
     consensus: Optional[dict] = None,
+    prior_comparison: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     flagged_passages = base_analysis.get("flagged_passages", [])
@@ -1188,6 +1267,7 @@ def _build_response(
         "litigation": _build_litigation(advanced, claude_litigation),
         "activist_triggers": _build_activist(advanced, claude_activist),
         "guidance_clarity": _build_guidance(advanced, claude_guidance, consensus),
+        "prior_comparison": prior_comparison,
         "session_id": session_id,
         "_debug": {
             "flagged_passage_count": len(flagged_passages),
@@ -1214,6 +1294,8 @@ def _export_word_improved(
     claude_rewrites: Optional[dict] = None,
     advanced: Optional[dict] = None,
     claude_analysis: Optional[dict] = None,
+    prior_comparison: Optional[dict] = None,
+    peer_comparison: Optional[dict] = None,
 ):
     """
     Word export with word-level diffs instead of full-sentence strikethrough.
@@ -1254,6 +1336,117 @@ def _export_word_improved(
     doc.add_paragraph()
     doc.add_paragraph("\u2500" * 50)
     doc.add_paragraph()
+
+    # Score Comparison section
+    scores = _corrected_scores(analysis)
+    _has_comparison = (prior_comparison and prior_comparison.get("vs_prior")) or \
+                      (peer_comparison and peer_comparison.get("peer_average"))
+
+    if _has_comparison:
+        doc.add_heading("Score Comparison", level=1)
+
+        if prior_comparison and prior_comparison.get("vs_prior"):
+            vs = prior_comparison["vs_prior"]
+            delta = vs.get("overall_delta", 0)
+            sign = "+" if delta > 0 else ""
+            quarter = vs.get("quarter", "Prior")
+            prior_overall = prior_comparison["prior_scores"][0]["scores"]["overall"] if prior_comparison.get("prior_scores") else "?"
+
+            doc.add_heading(f"vs. Prior Call ({quarter})", level=2)
+
+            from docx.shared import Inches
+            prior_table = doc.add_table(rows=7, cols=3)
+            prior_table.style = "Light Grid Accent 1"
+
+            headers = ["Dimension", "Current", quarter]
+            for i, h in enumerate(headers):
+                prior_table.rows[0].cells[i].text = h
+
+            dim_map = [
+                ("Overall", "overall"),
+                ("Sentiment", "sentiment"),
+                ("Confidence", "confidence"),
+                ("Ownership", "ownership"),
+                ("Clarity", "clarity"),
+                ("Red Flags", "red_flags"),
+            ]
+            for row_idx, (label, key) in enumerate(dim_map, start=1):
+                cur_val = scores.get(key, 0)
+                prev_val = prior_comparison["prior_scores"][0]["scores"].get(key, 0) if prior_comparison.get("prior_scores") else 0
+                d = cur_val - prev_val
+                d_str = f" ({'+' if d > 0 else ''}{d})"
+                prior_table.rows[row_idx].cells[0].text = label
+                prior_table.rows[row_idx].cells[1].text = f"{cur_val}{d_str}"
+                prior_table.rows[row_idx].cells[2].text = str(prev_val)
+
+            doc.add_paragraph()
+
+            # Trend line
+            if prior_comparison.get("prior_scores") and len(prior_comparison["prior_scores"]) > 1:
+                trend_parts = [
+                    f"{ps['quarter']}: {ps['scores']['overall']}"
+                    for ps in reversed(prior_comparison["prior_scores"])
+                ]
+                trend_parts.append(f"Current: {scores.get('overall', 0)}")
+                trend_p = doc.add_paragraph()
+                trend_p.add_run("Trend: ").bold = True
+                trend_p.add_run(" \u2192 ".join(trend_parts))
+                doc.add_paragraph()
+
+        if peer_comparison and peer_comparison.get("peer_average"):
+            peer_avg = peer_comparison["peer_average"]
+            vs_peer = peer_comparison.get("vs_peer_group", {})
+            pct_delta = vs_peer.get("overall_pct_delta", "N/A")
+            n_peers = peer_comparison.get("peers_scored", 0)
+
+            doc.add_heading("vs. Peer Group", level=2)
+
+            summary_p = doc.add_paragraph()
+            summary_p.add_run(f"Overall score is {pct_delta} "
+                              f"{'above' if vs_peer.get('overall_delta', 0) >= 0 else 'below'} "
+                              f"peer group average ({peer_avg.get('overall', '?')}/100). "
+                              f"Based on {n_peers} peers.")
+
+            peer_table = doc.add_table(rows=7, cols=4)
+            peer_table.style = "Light Grid Accent 1"
+
+            for i, h in enumerate(["Dimension", "Current", "Peer Avg", "Delta"]):
+                peer_table.rows[0].cells[i].text = h
+
+            dim_map = [
+                ("Overall", "overall"),
+                ("Sentiment", "sentiment"),
+                ("Confidence", "confidence"),
+                ("Ownership", "ownership"),
+                ("Clarity", "clarity"),
+                ("Red Flags", "red_flags"),
+            ]
+            dim_deltas = vs_peer.get("dimension_deltas", {})
+            for row_idx, (label, key) in enumerate(dim_map, start=1):
+                cur_val = scores.get(key, 0)
+                avg_val = peer_avg.get(key, 0)
+                d = dim_deltas.get(key, cur_val - avg_val) if key != "overall" else vs_peer.get("overall_delta", 0)
+                peer_table.rows[row_idx].cells[0].text = label
+                peer_table.rows[row_idx].cells[1].text = str(cur_val)
+                peer_table.rows[row_idx].cells[2].text = str(avg_val)
+                peer_table.rows[row_idx].cells[3].text = f"{'+' if d >= 0 else ''}{d}"
+
+            doc.add_paragraph()
+
+            # List individual peers
+            if peer_comparison.get("peer_details"):
+                peers_p = doc.add_paragraph()
+                peers_p.add_run("Peers: ").bold = True
+                ticker_list = ", ".join(
+                    f"{p['ticker']} ({p['scores']['overall']})"
+                    for p in peer_comparison["peer_details"]
+                )
+                peers_p.add_run(ticker_list)
+
+            doc.add_paragraph()
+
+        doc.add_paragraph("\u2500" * 50)
+        doc.add_paragraph()
 
     # Build rewrite lookup from flagged_passages + claude_rewrites.
     # Key insight: use the EXACT sentence strings from flagged_passages
@@ -1927,6 +2120,24 @@ async def analyze(
     else:
         logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
+    # Score prior transcripts for comparison (fast — no Claude calls needed)
+    prior_scored = []
+    if prior_transcripts:
+        current_scores = _corrected_scores(base_analysis)
+        for t in prior_transcripts:
+            try:
+                prior_base = analyze_transcript(t["content"], LM_DICT)
+                prior_sc = _corrected_scores(prior_base)
+                prior_scored.append({"quarter": t["quarter"], "scores": prior_sc})
+            except Exception as e:
+                logger.warning(f"Failed to score prior transcript {t['quarter']}: {e}")
+        if prior_scored:
+            logger.info(f"Scored {len(prior_scored)} prior transcripts for comparison")
+
+    prior_comparison = _build_prior_comparison(
+        _corrected_scores(base_analysis), prior_scored
+    )
+
     # Create session
     session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {
@@ -1937,11 +2148,14 @@ async def analyze(
         "claude_rewrites": claude_rewrites,
         "claude_analysis": claude_analysis,
         "consensus": consensus,
+        "prior_comparison": prior_comparison,
+        "ticker": ticker.strip().upper() if ticker and ticker.strip() else None,
     }
 
     return _build_response(
         transcript, base_analysis, advanced, session_id,
         claude_qa, claude_rewrites, claude_analysis, consensus,
+        prior_comparison,
     )
 
 
@@ -1953,7 +2167,12 @@ async def get_pdf(session_id: str):
 
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     tmp.close()
-    export_pdf(session["text"], session["base_analysis"], tmp.name)
+    export_pdf(
+        session["text"], session["base_analysis"], tmp.name,
+        ticker=session.get("ticker"),
+        prior_comparison=session.get("prior_comparison"),
+        peer_comparison=session.get("peer_comparison"),
+    )
     return FileResponse(
         tmp.name,
         media_type="application/pdf",
@@ -1976,6 +2195,8 @@ async def get_word(session_id: str):
         session.get("claude_rewrites"),
         session.get("advanced"),
         session.get("claude_analysis"),
+        session.get("prior_comparison"),
+        session.get("peer_comparison"),
     )
     return FileResponse(
         tmp.name,
@@ -1999,7 +2220,86 @@ async def get_json(session_id: str):
         session.get("claude_rewrites"),
         session.get("claude_analysis"),
         session.get("consensus"),
+        session.get("prior_comparison"),
     )
+
+
+@app.get("/api/peer-comparison/{session_id}")
+async def get_peer_comparison(session_id: str):
+    """Async endpoint: fetch peer tickers, score their transcripts, compare."""
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    ticker = session.get("ticker")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="No ticker associated with this session")
+
+    # Get current scores
+    current_scores = _corrected_scores(session["base_analysis"])
+
+    # Fetch peer tickers
+    peer_tickers = await _fetch_peer_tickers(ticker)
+    if not peer_tickers:
+        return {
+            "peer_tickers": [],
+            "peers_scored": 0,
+            "peer_average": None,
+            "vs_peer_group": None,
+            "peer_details": [],
+            "error": "No peers found for this ticker",
+        }
+
+    logger.info(f"Scoring {len(peer_tickers)} peers for {ticker}: {peer_tickers}")
+
+    # Score all peers in parallel
+    results = await asyncio.gather(*[_score_peer(t) for t in peer_tickers])
+    scored_peers = [r for r in results if r is not None]
+
+    if not scored_peers:
+        return {
+            "peer_tickers": peer_tickers,
+            "peers_scored": 0,
+            "peer_average": None,
+            "vs_peer_group": None,
+            "peer_details": [],
+            "error": "No peer transcripts available for scoring",
+        }
+
+    logger.info(f"Successfully scored {len(scored_peers)}/{len(peer_tickers)} peers")
+
+    # Calculate peer group averages
+    dims = ["overall", "sentiment", "confidence", "ownership", "clarity", "red_flags"]
+    peer_avg = {}
+    for d in dims:
+        values = [p["scores"][d] for p in scored_peers if d in p["scores"]]
+        peer_avg[d] = round(sum(values) / len(values)) if values else 0
+
+    # Compute deltas
+    dimension_deltas = {}
+    for d in dims:
+        dimension_deltas[d] = current_scores.get(d, 0) - peer_avg.get(d, 0)
+
+    overall_delta = dimension_deltas.get("overall", 0)
+    peer_overall = peer_avg.get("overall", 1)
+    pct_delta = round((overall_delta / peer_overall) * 100, 1) if peer_overall else 0
+
+    peer_comparison = {
+        "peer_tickers": peer_tickers,
+        "peers_scored": len(scored_peers),
+        "peer_average": peer_avg,
+        "vs_peer_group": {
+            "overall_delta": overall_delta,
+            "overall_pct_delta": f"{'+' if pct_delta >= 0 else ''}{pct_delta}%",
+            "dimension_deltas": {k: v for k, v in dimension_deltas.items() if k != "overall"},
+        },
+        "peer_details": scored_peers,
+    }
+
+    # Store in session so exports can access it
+    session["peer_comparison"] = peer_comparison
+
+    return peer_comparison
 
 
 # ---------------------------------------------------------------------------

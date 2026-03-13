@@ -7,6 +7,7 @@ import FlaggedIssue from '../components/FlaggedIssue'
 import AnalystQA from '../components/AnalystQA'
 import LitigationPanel from '../components/LitigationPanel'
 import ExportButtons from '../components/ExportButtons'
+import ScoreComparison from '../components/ScoreComparison'
 
 /* ------------------------------------------------------------------ */
 /*  Activist Triggers tab (inline — same pattern as LitigationPanel)   */
@@ -210,7 +211,7 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, session_id } = results
+    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, prior_comparison, session_id } = results
 
     const tabCounts = {
       flagged: flagged_issues?.length || 0,
@@ -247,6 +248,14 @@ export default function Analyzer() {
               <ScoreCard key={dim} dimension={dim} score={scores[dim]} />
             ))}
           </div>
+
+          {/* Score Comparison (Prior Call + Peer Group) */}
+          <ScoreComparison
+            currentScores={scores}
+            priorComparison={prior_comparison}
+            sessionId={session_id}
+            ticker={ticker}
+          />
 
           {/* Stock Impact Prediction */}
           <StockImpact data={stock_impact} />

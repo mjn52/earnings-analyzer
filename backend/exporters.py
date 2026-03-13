@@ -161,7 +161,8 @@ def classify_sentence(sentence):
 # PDF EXPORT
 # ============================================================
 
-def export_pdf(text, analysis, output_path, ticker=None, quarter=None):
+def export_pdf(text, analysis, output_path, ticker=None, quarter=None,
+               prior_comparison=None, peer_comparison=None):
     """
     Export a PDF report with color-highlighted script
     RED = problem sentences, YELLOW = watch, GREEN = good
@@ -276,8 +277,111 @@ def export_pdf(text, analysis, output_path, ticker=None, quarter=None):
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f8f9fa')),
     ]))
     content.append(score_table)
-    content.append(Spacer(1, 20))
-    
+    content.append(Spacer(1, 15))
+
+    # Prior call comparison
+    if prior_comparison and prior_comparison.get("vs_prior"):
+        vs = prior_comparison["vs_prior"]
+        delta = vs.get("overall_delta", 0)
+        arrow = "\u2191" if delta > 0 else "\u2193" if delta < 0 else "\u2194"
+        sign = "+" if delta > 0 else ""
+        prior_score = prior_comparison["prior_scores"][0]["scores"]["overall"] if prior_comparison.get("prior_scores") else "?"
+
+        content.append(Paragraph("VS. PRIOR CALL", heading_style))
+
+        prior_data = [
+            ["", "Current", vs.get("quarter", "Prior")],
+            ["Overall", str(int(scores['overall'])), str(int(prior_score))],
+        ]
+        dim_labels = {"sentiment": "Sentiment", "confidence": "Confidence",
+                      "ownership": "Ownership", "clarity": "Clarity", "red_flags": "Red Flags"}
+        for dim_key, dim_label in dim_labels.items():
+            cur_val = int(scores.get(dim_key, 0))
+            prev_val = int(prior_comparison["prior_scores"][0]["scores"].get(dim_key, 0)) if prior_comparison.get("prior_scores") else 0
+            d = cur_val - prev_val
+            d_str = f"{'+' if d > 0 else ''}{d}"
+            prior_data.append([dim_label, f"{cur_val} ({d_str})", str(prev_val)])
+
+        prior_table = Table(prior_data, colWidths=[1.5*inch, 1.5*inch, 1.5*inch])
+        prior_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4a90d9')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f0f4ff')),
+            ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),
+        ]))
+        content.append(prior_table)
+
+        # Trend line if multiple quarters
+        if prior_comparison.get("prior_scores") and len(prior_comparison["prior_scores"]) > 1:
+            trend_parts = []
+            for ps in reversed(prior_comparison["prior_scores"]):
+                trend_parts.append(f"{ps['quarter']}: {ps['scores']['overall']}")
+            trend_parts.append(f"Current: {int(scores['overall'])}")
+            content.append(Paragraph(
+                f"<i>Trend: {' → '.join(trend_parts)}</i>",
+                body_style,
+            ))
+
+        content.append(Spacer(1, 15))
+
+    # Peer group comparison
+    if peer_comparison and peer_comparison.get("peer_average"):
+        content.append(Paragraph("VS. PEER GROUP", heading_style))
+
+        peer_avg = peer_comparison["peer_average"]
+        vs_peer = peer_comparison.get("vs_peer_group", {})
+        pct_delta = vs_peer.get("overall_pct_delta", "N/A")
+        n_peers = peer_comparison.get("peers_scored", 0)
+
+        content.append(Paragraph(
+            f"Overall score is <b>{pct_delta}</b> "
+            f"{'above' if vs_peer.get('overall_delta', 0) >= 0 else 'below'} peer group average "
+            f"({peer_avg.get('overall', '?')}/100). Based on {n_peers} peers.",
+            body_style,
+        ))
+
+        peer_data = [
+            ["", "Current", "Peer Avg", "Delta"],
+            ["Overall", str(int(scores['overall'])), str(int(peer_avg.get('overall', 0))),
+             f"{'+' if vs_peer.get('overall_delta', 0) >= 0 else ''}{vs_peer.get('overall_delta', 0)}"],
+        ]
+        dim_labels = {"sentiment": "Sentiment", "confidence": "Confidence",
+                      "ownership": "Ownership", "clarity": "Clarity", "red_flags": "Red Flags"}
+        dim_deltas = vs_peer.get("dimension_deltas", {})
+        for dim_key, dim_label in dim_labels.items():
+            cur_val = int(scores.get(dim_key, 0))
+            avg_val = int(peer_avg.get(dim_key, 0))
+            d = dim_deltas.get(dim_key, cur_val - avg_val)
+            peer_data.append([dim_label, str(cur_val), str(avg_val), f"{'+' if d >= 0 else ''}{d}"])
+
+        peer_table = Table(peer_data, colWidths=[1.3*inch, 1.2*inch, 1.2*inch, 1*inch])
+        peer_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6c5ce7')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f5f3ff')),
+            ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),
+        ]))
+        content.append(peer_table)
+
+        # List peer tickers
+        if peer_comparison.get("peer_details"):
+            ticker_list = ", ".join(
+                f"{p['ticker']} ({p['scores']['overall']})"
+                for p in peer_comparison["peer_details"]
+            )
+            content.append(Paragraph(
+                f"<i>Peers: {ticker_list}</i>",
+                body_style,
+            ))
+
+        content.append(Spacer(1, 15))
+
     # Legend
     content.append(Paragraph("COLOR LEGEND", heading_style))
     legend_data = [
