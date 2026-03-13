@@ -2013,24 +2013,31 @@ async def analyze(
     # Run all advanced analyses via the wrapper — synchronous, fast
     advanced = run_advanced_analysis(transcript, base_analysis)
 
-    # Fetch prior transcripts + generate Claude Q&A + rewrites + analysis (async, parallel)
+    # Fetch prior transcripts (FMP only — no Claude needed) and consensus estimates
+    prior_transcripts = []
+    consensus = None
+    if ticker and ticker.strip():
+        try:
+            prior_transcripts = await _fetch_prior_transcripts(ticker.strip())
+            logger.info(
+                f"Fetched {len(prior_transcripts)} prior transcripts for {ticker.strip().upper()}"
+            )
+        except Exception as e:
+            logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
+
+        try:
+            consensus = await _fetch_consensus_estimates(ticker.strip())
+            if consensus:
+                logger.info(f"FMP consensus available for {ticker}: date={consensus.get('date')}")
+        except Exception as e:
+            logger.warning(f"Consensus fetch failed: {type(e).__name__}: {e}")
+
+    # Generate Claude Q&A + rewrites + analysis (async, parallel)
     claude_qa = None
     claude_rewrites = None
     claude_analysis = None
-    consensus = None
-    prior_transcripts = []
     if ANTHROPIC_API_KEY:
         logger.info(f"Claude API key present, ticker={ticker}")
-
-        # Fetch prior call transcripts if ticker provided
-        if ticker and ticker.strip():
-            try:
-                prior_transcripts = await _fetch_prior_transcripts(ticker.strip())
-                logger.info(
-                    f"Fetched {len(prior_transcripts)} prior transcripts for {ticker.strip().upper()}"
-                )
-            except Exception as e:
-                logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
 
         # Prepare flagged sentences for rewrite — start with flagged_passages
         flagged_for_rewrite = [
@@ -2092,17 +2099,8 @@ async def analyze(
                 logger.error(f"Claude analysis failed: {type(e).__name__}: {e}")
                 return None
 
-        async def _safe_consensus():
-            try:
-                if ticker and ticker.strip():
-                    return await _fetch_consensus_estimates(ticker.strip())
-                return None
-            except Exception as e:
-                logger.warning(f"Consensus fetch failed: {type(e).__name__}: {e}")
-                return None
-
-        claude_qa, claude_rewrites, claude_analysis, consensus = await asyncio.gather(
-            _safe_qa(), _safe_rewrites(), _safe_analysis(), _safe_consensus()
+        claude_qa, claude_rewrites, claude_analysis = await asyncio.gather(
+            _safe_qa(), _safe_rewrites(), _safe_analysis()
         )
 
         if claude_qa:
@@ -2115,8 +2113,6 @@ async def analyze(
         if claude_analysis:
             logger.info(f"Claude analysis: {len(claude_analysis.get('negative_interpretations', []))} neg interps, "
                          f"{len(claude_analysis.get('guidance_metrics', []))} guidance metrics")
-        if consensus:
-            logger.info(f"FMP consensus available for {ticker}: date={consensus.get('date')}")
     else:
         logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
