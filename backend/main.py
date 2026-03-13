@@ -538,8 +538,8 @@ async def _fetch_consensus_estimates(ticker: str) -> Optional[dict]:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                f"https://financialmodelingprep.com/api/v3/analyst-estimates/{ticker}",
-                params={"apikey": FMP_API_KEY, "limit": 1},
+                "https://financialmodelingprep.com/stable/analyst-estimates",
+                params={"symbol": ticker, "apikey": FMP_API_KEY, "limit": 1},
             )
             if resp.status_code != 200:
                 logger.warning(f"FMP consensus fetch returned {resp.status_code} for {ticker}")
@@ -636,8 +636,8 @@ async def _fetch_prior_transcripts(ticker: str, num_quarters: int = 4) -> List[d
         for yr, qtr in quarters:
             try:
                 resp = await client.get(
-                    f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}",
-                    params={"quarter": qtr, "year": yr, "apikey": FMP_API_KEY},
+                    "https://financialmodelingprep.com/stable/earning-call-transcript",
+                    params={"symbol": ticker, "quarter": qtr, "year": yr, "apikey": FMP_API_KEY},
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -668,7 +668,7 @@ async def _fetch_peer_tickers(ticker: str, max_peers: int = 8) -> List[str]:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                "https://financialmodelingprep.com/api/v4/stock_peers",
+                "https://financialmodelingprep.com/stable/stock-peers",
                 params={"symbol": ticker, "apikey": FMP_API_KEY},
             )
             if resp.status_code != 200:
@@ -1919,8 +1919,8 @@ async def test_fmp(ticker: str):
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
-                f"https://financialmodelingprep.com/api/v3/earning_call_transcript/{ticker}",
-                params={"quarter": 4, "year": 2025, "apikey": FMP_API_KEY},
+                "https://financialmodelingprep.com/stable/earning-call-transcript",
+                params={"symbol": ticker, "quarter": 4, "year": 2025, "apikey": FMP_API_KEY},
             )
             results["transcript_status"] = resp.status_code
             results["transcript_response_length"] = len(resp.text)
@@ -1941,7 +1941,7 @@ async def test_fmp(ticker: str):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                "https://financialmodelingprep.com/api/v4/stock_peers",
+                "https://financialmodelingprep.com/stable/stock-peers",
                 params={"symbol": ticker, "apikey": FMP_API_KEY},
             )
             results["peers_status"] = resp.status_code
