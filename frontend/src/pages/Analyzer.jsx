@@ -249,11 +249,10 @@ export default function Analyzer() {
             ))}
           </div>
 
-          {/* Score Comparison (Prior Call + Peer Group) */}
+          {/* Score Comparison (vs. Prior Calls) */}
           <ScoreComparison
             currentScores={scores}
             priorComparison={prior_comparison}
-            sessionId={session_id}
             ticker={ticker}
           />
 
