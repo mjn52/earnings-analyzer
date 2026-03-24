@@ -71,3 +71,4 @@ docker-compose up --build
 10. Guidance Clarity Assessment
 11. Legal Context Awareness
 12. Historical Comparison
+13. **Bull/Bear Case Defense** (requires ticker) — Identifies the 3-5 strongest bull and bear investment cases for the company, then proposes sentence-level rewrites to address bear concerns head-on and reinforce bull arguments. Rewrites appear inline in flagged issues and Word export track changes.
