@@ -122,6 +122,69 @@ function NegativeInterpTab({ items }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Bull/Bear Case Defense card (shown above tabs when ticker provided) */
+/* ------------------------------------------------------------------ */
+
+function BullBearCard({ data }) {
+  if (!data) return null
+  const { bull_cases = [], bear_cases = [], rewrite_count = 0 } = data
+
+  if (bull_cases.length === 0 && bear_cases.length === 0) return null
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+          <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0 0 12 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 0 1-2.031.352 5.988 5.988 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971Zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0 2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 0 1-2.031.352 5.989 5.989 0 0 1-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971Z" />
+          </svg>
+        </div>
+        <div>
+          <h2 className="font-sora text-lg font-bold text-text-main">
+            Bull/Bear Case Defense
+          </h2>
+          <p className="text-sm text-text-muted">
+            {rewrite_count} script rewrite{rewrite_count !== 1 ? 's' : ''} suggested to address investment cases
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-col gap-4 sm:flex-row">
+        {/* Bull Cases */}
+        <div className="flex-1 rounded-xl border-2 border-success bg-success/5 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-success">
+            Bull Cases
+          </p>
+          <div className="mt-3 space-y-3">
+            {bull_cases.map((c, i) => (
+              <div key={i}>
+                <p className="text-sm font-semibold text-text-main">{c.thesis}</p>
+                <p className="mt-1 text-xs text-text-muted">{c.explanation}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Bear Cases */}
+        <div className="flex-1 rounded-xl border-2 border-danger bg-danger/5 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-danger">
+            Bear Cases
+          </p>
+          <div className="mt-3 space-y-3">
+            {bear_cases.map((c, i) => (
+              <div key={i}>
+                <p className="text-sm font-semibold text-text-main">{c.thesis}</p>
+                <p className="mt-1 text-xs text-text-muted">{c.explanation}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main Analyzer Page                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -211,7 +274,7 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, prior_comparison, session_id } = results
+    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, bull_bear_cases, prior_comparison, session_id } = results
 
     const tabCounts = {
       flagged: flagged_issues?.length || 0,
@@ -258,6 +321,9 @@ export default function Analyzer() {
 
           {/* Stock Impact Prediction */}
           <StockImpact data={stock_impact} />
+
+          {/* Bull/Bear Case Defense */}
+          <BullBearCard data={bull_bear_cases} />
 
           {/* Tab Navigation */}
           <div className="mt-10 flex gap-1 overflow-x-auto border-b border-border">

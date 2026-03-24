@@ -525,6 +525,118 @@ async def _generate_analysis_with_claude(
 
 
 # ---------------------------------------------------------------------------
+# 4th parallel Claude call: Bull/Bear Case Defense
+# ---------------------------------------------------------------------------
+
+_BULL_BEAR_SYSTEM_PROMPT = """You are a senior equity research analyst at JP Morgan with deep sector coverage.
+
+Your task has two parts:
+
+PART 1 — BULL/BEAR CASES:
+Identify the 3-5 strongest bull cases and 3-5 strongest bear cases for the given company.
+These should reflect the current Wall Street consensus debate — the real arguments institutional investors are making. For each case, provide a one-sentence thesis and a 2-3 sentence explanation.
+
+PART 2 — SCRIPT REWRITES:
+Review the earnings call script. For each bear case, find sentences that:
+(a) ignore the bear case when they should address it head-on,
+(b) inadvertently give credence to the bear narrative, or
+(c) miss an opportunity to defuse it with data or framing.
+
+For each bull case, find sentences that could more strongly reinforce the bull thesis with specific language improvements.
+
+For each rewrite, quote the EXACT original sentence from the script and provide an improved version. The rewrite should sound natural for an executive delivering an earnings call — authoritative, specific, and confident without being legally reckless.
+
+Return ONLY valid JSON (no markdown, no code fences):
+{
+  "bull_cases": [
+    {"thesis": "one-sentence bull thesis", "explanation": "2-3 sentence explanation"}
+  ],
+  "bear_cases": [
+    {"thesis": "one-sentence bear thesis", "explanation": "2-3 sentence explanation"}
+  ],
+  "rewrites": [
+    {
+      "original_text": "exact quote from the script",
+      "suggested_rewrite": "improved version of the sentence",
+      "case_type": "bull" or "bear",
+      "case_thesis": "the one-sentence thesis this rewrite addresses",
+      "rationale": "one sentence explaining why this change matters"
+    }
+  ]
+}"""
+
+
+async def _generate_bull_bear_with_claude(
+    script: str,
+    ticker: str,
+) -> Optional[dict]:
+    """
+    4th parallel Claude call: identifies bull/bear investment cases for the
+    company and proposes sentence-level rewrites to the earnings script that
+    address bear concerns and reinforce bull arguments.
+    Only runs when a ticker is provided.
+    """
+    if not ANTHROPIC_API_KEY or not ticker:
+        return None
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        script_words = script.split()
+        if len(script_words) > 8000:
+            script_text = " ".join(script_words[:8000])
+            script_text += f"\n[...truncated from {len(script_words)} words]"
+        else:
+            script_text = script
+
+        user_message = (
+            f"COMPANY: {ticker.upper()}\n\n"
+            f"EARNINGS CALL SCRIPT:\n{'=' * 60}\n"
+            f"{script_text}\n{'=' * 60}\n\n"
+            f"Analyze the bull and bear cases for {ticker.upper()} and propose "
+            f"rewrites to this earnings script as specified."
+        )
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=8000,
+            system=_BULL_BEAR_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Handle markdown code fences
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+            response_text = re.sub(r"\s*```$", "", response_text)
+
+        data = json.loads(response_text)
+
+        bull_cases = data.get("bull_cases", [])
+        bear_cases = data.get("bear_cases", [])
+        rewrites = data.get("rewrites", [])
+
+        logger.info(
+            f"Claude bull/bear for {ticker}: {len(bull_cases)} bull cases, "
+            f"{len(bear_cases)} bear cases, {len(rewrites)} rewrites"
+        )
+
+        return {
+            "bull_cases": bull_cases,
+            "bear_cases": bear_cases,
+            "rewrites": rewrites,
+        }
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Claude bull/bear JSON parse error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Claude bull/bear generation failed: {type(e).__name__}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # FMP consensus estimates fetch
 # ---------------------------------------------------------------------------
 
@@ -568,15 +680,24 @@ async def _fetch_consensus_estimates(ticker: str) -> Optional[dict]:
 # Mapping helpers — transform existing output into the spec's JSON shape
 # ---------------------------------------------------------------------------
 
-def _build_flagged_issues(text: str, base_analysis: dict, claude_rewrites: Optional[dict] = None) -> list:
+def _build_flagged_issues(
+    text: str,
+    base_analysis: dict,
+    claude_rewrites: Optional[dict] = None,
+    claude_bull_bear: Optional[dict] = None,
+) -> list:
     """
     Enrich the base flagged_passages with colour and suggested rewrites.
     Uses Claude rewrites when available, falls back to sacred rewriter.
+    Also merges bull/bear defense rewrites as additional flagged issues.
     """
     issues = []
+    seen_sentences = set()  # Track sentences already flagged (for dedup with bull/bear)
+
     for fp in base_analysis.get("flagged_passages", []):
         sentence = fp["sentence"]
         color, _ = classify_sentence(sentence)
+        seen_sentences.add(' '.join(sentence.split()))
 
         # Use Claude rewrite if available (try exact match, then normalized)
         rewrite = None
@@ -594,6 +715,49 @@ def _build_flagged_issues(text: str, base_analysis: dict, claude_rewrites: Optio
                 "suggested_rewrite": rewrite if rewrite != sentence else None,
             }
         )
+
+    # Append bull/bear defense rewrites as additional flagged issues
+    if claude_bull_bear and "rewrites" in claude_bull_bear:
+        for rw in claude_bull_bear["rewrites"]:
+            orig = rw.get("original_text", "")
+            rewrite = rw.get("suggested_rewrite", "")
+            case_type = rw.get("case_type", "bear").title()
+            thesis = rw.get("case_thesis", "")
+            rationale = rw.get("rationale", "")
+
+            if not orig or not rewrite or rewrite == orig:
+                continue
+
+            norm_key = ' '.join(orig.split())
+
+            # If this sentence is already flagged, add the bull/bear tag to it
+            # rather than creating a duplicate entry
+            already_flagged = False
+            if norm_key in seen_sentences:
+                for issue in issues:
+                    if ' '.join(issue["sentence"].split()) == norm_key:
+                        tag = f"Bull/Bear Defense: {case_type} Case"
+                        issue["issues"] = issue["issues"] + [tag]
+                        # Bull/bear rewrite takes priority (addresses narrative + issue)
+                        issue["suggested_rewrite"] = rewrite
+                        if rationale:
+                            issue["bull_bear_rationale"] = rationale
+                        already_flagged = True
+                        break
+
+            if not already_flagged:
+                thesis_short = thesis[:80] if thesis else ""
+                issues.append({
+                    "sentence": orig,
+                    "color": "YELLOW",
+                    "issues": [f"Bull/Bear Defense: {case_type} Case — {thesis_short}"],
+                    "suggested_rewrite": rewrite,
+                    "source": "bull_bear",
+                    "case_type": rw.get("case_type", "bear"),
+                    "case_thesis": thesis,
+                    "rationale": rationale,
+                })
+
     return issues
 
 
@@ -1167,6 +1331,7 @@ def _build_response(
     claude_analysis: Optional[dict] = None,
     consensus: Optional[dict] = None,
     prior_comparison: Optional[dict] = None,
+    claude_bull_bear: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     flagged_passages = base_analysis.get("flagged_passages", [])
@@ -1208,12 +1373,17 @@ def _build_response(
     return {
         "scores": scores,
         "stock_impact": _predict_impact(scores),
-        "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites),
+        "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites, claude_bull_bear),
         "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
         "negative_interpretations": neg_interps,
         "litigation": _build_litigation(advanced, claude_litigation),
         "activist_triggers": _build_activist(advanced, claude_activist),
         "guidance_clarity": _build_guidance(advanced, claude_guidance, consensus),
+        "bull_bear_cases": {
+            "bull_cases": claude_bull_bear.get("bull_cases", []),
+            "bear_cases": claude_bull_bear.get("bear_cases", []),
+            "rewrite_count": len(claude_bull_bear.get("rewrites", [])),
+        } if claude_bull_bear else None,
         "prior_comparison": prior_comparison,
         "session_id": session_id,
         "_debug": {
@@ -1225,6 +1395,7 @@ def _build_response(
             "claude_guidance_count": len(claude_guidance) if claude_guidance else 0,
             "claude_litigation_count": len(claude_litigation) if claude_litigation else 0,
             "claude_activist_count": len(claude_activist) if claude_activist else 0,
+            "claude_bull_bear_available": claude_bull_bear is not None,
             "consensus_available": consensus is not None,
         },
     }
@@ -1242,6 +1413,7 @@ def _export_word_improved(
     advanced: Optional[dict] = None,
     claude_analysis: Optional[dict] = None,
     prior_comparison: Optional[dict] = None,
+    claude_bull_bear: Optional[dict] = None,
 ):
     """
     Word export with word-level diffs instead of full-sentence strikethrough.
@@ -1431,10 +1603,33 @@ def _export_word_improved(
                 _act_merged += 1
                 _advanced_rewrites.append(("activist", orig, rewrite, annotation, t))
 
+    # Bull/Bear Defense rewrites — these OVERWRITE existing rewrites for the
+    # same sentence because a well-crafted bull/bear rewrite addresses both the
+    # market narrative AND the underlying issue (litigation, activist, etc.)
+    _bb_merged = 0
+    if claude_bull_bear and "rewrites" in claude_bull_bear:
+        for rw in claude_bull_bear["rewrites"]:
+            orig = rw.get("original_text", "")
+            rewrite = rw.get("suggested_rewrite", "")
+            if orig and rewrite and rewrite != orig:
+                norm_key = ' '.join(orig.split())
+                # Note if we're overwriting an existing rewrite
+                existing_annotation = _rewrite_annotations.get(norm_key)
+                also_note = f" [also: {existing_annotation}]" if existing_annotation else ""
+                # Overwrite — bull/bear takes priority
+                _passage_rewrites[norm_key] = rewrite
+                case_type = rw.get("case_type", "bear").title()
+                thesis_short = rw.get("case_thesis", "")[:60]
+                annotation = f"Bull/Bear: {case_type} — {thesis_short}{also_note}"
+                _rewrite_annotations[norm_key] = annotation
+                _bb_merged += 1
+                _advanced_rewrites.append(("bull_bear", orig, rewrite, annotation, rw))
+
     logger.info(f"Word export: {_flagged_count} flagged passages, "
                  f"{len(_passage_rewrites)} with rewrites "
                  f"({_extra_from_claude} extra from classify_sentence via claude_rewrites, "
-                 f"{_neg_merged} neg interps, {_lit_merged} litigation, {_act_merged} activist), "
+                 f"{_neg_merged} neg interps, {_lit_merged} litigation, {_act_merged} activist, "
+                 f"{_bb_merged} bull/bear), "
                  f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
@@ -2070,8 +2265,8 @@ async def analyze(
             logger.warning(f"Capping rewrite batch from {len(flagged_for_rewrite)} to 80 sentences")
             flagged_for_rewrite = flagged_for_rewrite[:80]
 
-        # Run Claude Q&A, rewrites, and analysis IN PARALLEL (3 calls)
-        logger.info("Calling Claude for Q&A + rewrites + analysis (parallel)...")
+        # Run Claude Q&A, rewrites, analysis, and bull/bear IN PARALLEL (4 calls)
+        logger.info("Calling Claude for Q&A + rewrites + analysis + bull/bear (parallel)...")
 
         async def _safe_qa():
             try:
@@ -2099,8 +2294,17 @@ async def analyze(
                 logger.error(f"Claude analysis failed: {type(e).__name__}: {e}")
                 return None
 
-        claude_qa, claude_rewrites, claude_analysis = await asyncio.gather(
-            _safe_qa(), _safe_rewrites(), _safe_analysis()
+        async def _safe_bull_bear():
+            if not ticker or not ticker.strip():
+                return None
+            try:
+                return await _generate_bull_bear_with_claude(transcript, ticker.strip().upper())
+            except Exception as e:
+                logger.error(f"Claude bull/bear failed: {type(e).__name__}: {e}")
+                return None
+
+        claude_qa, claude_rewrites, claude_analysis, claude_bull_bear = await asyncio.gather(
+            _safe_qa(), _safe_rewrites(), _safe_analysis(), _safe_bull_bear()
         )
 
         if claude_qa:
@@ -2113,8 +2317,13 @@ async def analyze(
         if claude_analysis:
             logger.info(f"Claude analysis: {len(claude_analysis.get('negative_interpretations', []))} neg interps, "
                          f"{len(claude_analysis.get('guidance_metrics', []))} guidance metrics")
+        if claude_bull_bear:
+            logger.info(f"Claude bull/bear: {len(claude_bull_bear.get('bull_cases', []))} bull, "
+                         f"{len(claude_bull_bear.get('bear_cases', []))} bear, "
+                         f"{len(claude_bull_bear.get('rewrites', []))} rewrites")
     else:
         logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
+        claude_bull_bear = None
 
     # Score prior transcripts for comparison (fast — no Claude calls needed)
     prior_scored = []
@@ -2143,6 +2352,7 @@ async def analyze(
         "claude_qa": claude_qa,
         "claude_rewrites": claude_rewrites,
         "claude_analysis": claude_analysis,
+        "claude_bull_bear": claude_bull_bear,
         "consensus": consensus,
         "prior_comparison": prior_comparison,
         "ticker": ticker.strip().upper() if ticker and ticker.strip() else None,
@@ -2151,7 +2361,7 @@ async def analyze(
     return _build_response(
         transcript, base_analysis, advanced, session_id,
         claude_qa, claude_rewrites, claude_analysis, consensus,
-        prior_comparison,
+        prior_comparison, claude_bull_bear,
     )
 
 
@@ -2191,6 +2401,7 @@ async def get_word(session_id: str):
         session.get("advanced"),
         session.get("claude_analysis"),
         session.get("prior_comparison"),
+        session.get("claude_bull_bear"),
     )
     return FileResponse(
         tmp.name,
