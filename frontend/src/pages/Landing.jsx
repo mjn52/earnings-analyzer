@@ -282,14 +282,14 @@ export default function Landing() {
       <section id="how-it-works" className="bg-white px-6 py-20">
         <div className="mx-auto max-w-5xl">
           <h2 className="text-center font-sora text-3xl font-bold text-text-main">How It Works</h2>
-          <p className="mx-auto mt-3 max-w-xl text-center text-text-muted">Three steps. Two seconds. Zero data leaves your machine.</p>
+          <p className="mx-auto mt-3 max-w-xl text-center text-text-muted">Three steps. Two seconds. Your data stays private.</p>
 
           <div className="mt-14 grid gap-12 md:grid-cols-3">
             {[
               {
                 icon: <IconUpload />,
                 title: 'Upload Your Script',
-                desc: 'Paste or upload your draft. Nothing leaves your machine.',
+                desc: 'Paste or upload your draft. Your data stays private.',
               },
               {
                 icon: <IconAnalysis />,
