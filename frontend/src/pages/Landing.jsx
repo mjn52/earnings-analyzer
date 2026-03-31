@@ -364,20 +364,20 @@ export default function Landing() {
       {/* SECURITY / TRUST BAR */}
       <section id="security" className="bg-[#111827] px-6 py-20 text-white">
         <div className="mx-auto max-w-4xl text-center">
-          <h2 className="font-sora text-3xl font-bold">Your data never leaves.</h2>
+          <h2 className="font-sora text-3xl font-bold">Your data stays private.</h2>
           <p className="mx-auto mt-4 max-w-xl text-lg text-gray-400">
-            No API calls. No cloud processing. 100% local analysis. The same script that&rsquo;s running locally is what runs in our cloud.
+            Analysis is powered via encrypted API calls. Your data is never stored, never used for training, and never seen by a human. Results are generated in seconds and only visible to you.
           </p>
 
           <div className="mt-12 flex flex-wrap items-center justify-center gap-8 text-sm font-medium text-gray-300">
             <div className="flex items-center gap-2">
-              <span className="text-lg">&#128274;</span> No Data Transmitted
+              <span className="text-lg">&#128274;</span> Encrypted in Transit
             </div>
             <div className="flex items-center gap-2">
               <span className="text-lg">&#9889;</span> 2-Second Analysis
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-lg">&#128202;</span> Deterministic Results
+              <span className="text-lg">&#128202;</span> Never Stored or Trained On
             </div>
           </div>
         </div>
