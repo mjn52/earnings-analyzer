@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { useState } from 'react'
 
 /* ------------------------------------------------------------------ */
 /*  Inline SVG icons                                                   */
@@ -93,6 +94,26 @@ function IconActivist() {
 /* ------------------------------------------------------------------ */
 
 export default function Landing() {
+  const [showWaitlist, setShowWaitlist] = useState(false)
+  const [waitlistEmail, setWaitlistEmail] = useState('')
+  const [waitlistStatus, setWaitlistStatus] = useState(null) // 'loading' | 'success' | 'error'
+
+  async function handleWaitlistSubmit(e) {
+    e.preventDefault()
+    setWaitlistStatus('loading')
+    try {
+      const res = await fetch('/api/waitlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: waitlistEmail }),
+      })
+      if (!res.ok) throw new Error()
+      setWaitlistStatus('success')
+    } catch {
+      setWaitlistStatus('error')
+    }
+  }
+
   return (
     <div className="min-h-screen">
       {/* NAV */}
@@ -110,7 +131,10 @@ export default function Landing() {
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="hidden rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-muted transition-colors hover:border-primary hover:text-primary sm:inline-block">
+            <button
+              onClick={() => { setShowWaitlist(true); setWaitlistStatus(null); setWaitlistEmail(''); }}
+              className="hidden rounded-lg border border-border px-4 py-2 text-sm font-medium text-text-muted transition-colors hover:border-primary hover:text-primary sm:inline-block"
+            >
               Sign In
             </button>
             <Link
@@ -393,6 +417,58 @@ export default function Landing() {
           <p className="text-sm text-text-muted">&copy; 2025 StreetSignals.ai</p>
         </div>
       </footer>
+
+      {/* WAITLIST MODAL */}
+      {showWaitlist && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowWaitlist(false)}>
+          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-8 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            {waitlistStatus === 'success' ? (
+              <div className="text-center">
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                  <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
+                </div>
+                <h3 className="font-sora text-xl font-bold text-text-main">You're on the list!</h3>
+                <p className="mt-2 text-sm text-text-muted">We'll notify you as soon as accounts are available.</p>
+                <button onClick={() => setShowWaitlist(false)} className="mt-6 rounded-lg bg-primary px-6 py-2 text-sm font-semibold text-white hover:bg-primary-dark">
+                  Got it
+                </button>
+              </div>
+            ) : (
+              <>
+                <h3 className="font-sora text-xl font-bold text-text-main">Accounts coming soon</h3>
+                <p className="mt-2 text-sm text-text-muted">
+                  Join the waitlist to get early access to saved analyses, team features, and more.
+                </p>
+                <form onSubmit={handleWaitlistSubmit} className="mt-6">
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@company.com"
+                    value={waitlistEmail}
+                    onChange={(e) => setWaitlistEmail(e.target.value)}
+                    className="w-full rounded-lg border border-border px-4 py-3 text-sm text-text-main placeholder:text-text-muted/50 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  />
+                  <button
+                    type="submit"
+                    disabled={waitlistStatus === 'loading'}
+                    className="mt-3 w-full rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary-dark disabled:opacity-60"
+                  >
+                    {waitlistStatus === 'loading' ? 'Joining...' : 'Join Waitlist'}
+                  </button>
+                  {waitlistStatus === 'error' && (
+                    <p className="mt-2 text-center text-sm text-red-500">Something went wrong. Please try again.</p>
+                  )}
+                </form>
+                <button onClick={() => setShowWaitlist(false)} className="mt-4 w-full text-center text-sm text-text-muted hover:text-text-main">
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

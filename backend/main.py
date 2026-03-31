@@ -2038,6 +2038,37 @@ def _export_word_improved(
 # Routes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Waitlist
+# ---------------------------------------------------------------------------
+WAITLIST_FILE = os.path.join(os.path.dirname(__file__), "waitlist.json")
+
+@app.post("/api/waitlist")
+async def join_waitlist(request: Request):
+    """Add an email to the early-access waitlist."""
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+
+    # Load existing waitlist
+    entries = []
+    if os.path.exists(WAITLIST_FILE):
+        with open(WAITLIST_FILE, "r") as f:
+            entries = json.load(f)
+
+    # Avoid duplicates
+    if any(e["email"] == email for e in entries):
+        return {"status": "already_registered"}
+
+    entries.append({"email": email, "joined_at": datetime.now().isoformat()})
+    with open(WAITLIST_FILE, "w") as f:
+        json.dump(entries, f, indent=2)
+
+    logger.info(f"Waitlist signup: {email}")
+    return {"status": "ok"}
+
+
 @app.get("/api/health")
 async def health():
     """Diagnostic endpoint — check if API keys are configured."""
