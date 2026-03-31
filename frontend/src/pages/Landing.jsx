@@ -414,7 +414,7 @@ export default function Landing() {
             <LogoIcon />
             <span className="font-sora text-sm font-bold text-text-main">StreetSignals</span>
           </div>
-          <p className="text-sm text-text-muted">&copy; 2025 StreetSignals.ai</p>
+          <p className="text-sm text-text-muted">&copy; 2026 StreetSignals.ai</p>
         </div>
       </footer>
 
