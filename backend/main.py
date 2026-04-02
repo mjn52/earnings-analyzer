@@ -1633,7 +1633,19 @@ def _export_word_improved(
                  f"claude_rewrites={'None' if claude_rewrites is None else len(claude_rewrites)}")
 
     # Process sentences
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # Split on sentence-ending punctuation, then re-join fragments that
+    # were incorrectly split on abbreviation periods (Inc., Corp., etc.)
+    _ABBREVS = {"Inc", "Corp", "Ltd", "Co", "Dr", "Mr", "Mrs", "Ms",
+                "Jr", "Sr", "St", "vs", "etc", "Vol", "No", "Dept",
+                "Prof", "Gen", "Gov", "Rev", "Hon", "Pres", "Assn"}
+    raw_parts = re.split(r"(?<=[.!?])\s+", text)
+    sentences = []
+    for part in raw_parts:
+        # If previous fragment ends with an abbreviation period, merge
+        if sentences and any(sentences[-1].rstrip(".").endswith(ab) for ab in _ABBREVS):
+            sentences[-1] = sentences[-1] + " " + part
+        else:
+            sentences.append(part)
     _exact_hits = 0
     _fuzzy_hits = 0
     _word_overlap_hits = 0
@@ -1666,7 +1678,12 @@ def _export_word_improved(
                 # Step 2a: Check substring containment — Claude's original_text
                 # may span multiple sentences. If the current sentence is
                 # contained within a multi-sentence key, it's a match.
-                if len(key) > len(norm_sentence) + 10 and norm_sentence in key:
+                # Guard: the sentence must be at least 40% of the key length
+                # to prevent tiny fragments (e.g. "Owlet, Inc.") from matching
+                # against long multi-sentence passages.
+                if (len(key) > len(norm_sentence) + 10
+                        and norm_sentence in key
+                        and len(norm_sentence) >= len(key) * 0.4):
                     # Sentence is part of a multi-sentence original_text
                     ratio = 0.95
                 elif abs(len(key) - len(norm_sentence)) > 30:
