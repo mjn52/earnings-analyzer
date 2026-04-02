@@ -414,6 +414,10 @@ export default function Landing() {
             <LogoIcon />
             <span className="font-sora text-sm font-bold text-text-main">StreetSignals</span>
           </div>
+          <div className="flex items-center gap-6 text-sm text-text-muted">
+            <Link to="/terms" className="hover:text-primary">Terms</Link>
+            <Link to="/privacy" className="hover:text-primary">Privacy</Link>
+          </div>
           <p className="text-sm text-text-muted">&copy; 2026 StreetSignals.ai</p>
         </div>
       </footer>
