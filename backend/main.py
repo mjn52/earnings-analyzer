@@ -1685,21 +1685,38 @@ def _export_word_improved(
         # Step 3: Word-overlap match against advanced rewrite originals.
         # Handles character encoding differences (smart quotes, em-dashes)
         # and cases where the fuzzy length threshold (30 chars) skips the key.
+        _STOPWORDS = {
+            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to",
+            "for", "of", "with", "by", "from", "is", "are", "was", "were",
+            "be", "been", "being", "have", "has", "had", "do", "does", "did",
+            "will", "would", "shall", "should", "may", "might", "must", "can",
+            "could", "not", "no", "so", "if", "as", "it", "its", "we", "our",
+            "us", "this", "that", "these", "those", "than", "into", "also",
+        }
         if (not rewrite or rewrite == sentence) and _advanced_rewrites:
             sent_words = norm_sentence.lower().split()
-            if len(sent_words) >= 3:
+            sent_content = [w for w in sent_words if w not in _STOPWORDS]
+            if len(sent_content) >= 3:
                 best_adv_ratio = 0
                 best_adv_rw = None
                 best_adv_key = None
                 for _src, adv_orig, adv_rw, _ann, _item in _advanced_rewrites:
                     adv_norm = ' '.join(adv_orig.split())
-                    adv_word_set = set(adv_norm.lower().split())
+                    adv_content = [w for w in adv_norm.lower().split() if w not in _STOPWORDS]
+                    adv_content_set = set(adv_content)
                     # Sentence must be ≥70% of original word count to prevent
                     # matching a single sentence against a multi-sentence original.
-                    if len(sent_words) < len(adv_word_set) * 0.7:
+                    if len(sent_content) < len(adv_content) * 0.7:
                         continue
-                    matching = sum(1 for w in sent_words if w in adv_word_set)
-                    overlap = matching / len(sent_words)
+                    # Forward overlap: what % of sentence content words are in the original
+                    fwd_matching = sum(1 for w in sent_content if w in adv_content_set)
+                    fwd_overlap = fwd_matching / len(sent_content)
+                    # Reverse overlap: what % of original content words are in the sentence
+                    sent_content_set = set(sent_content)
+                    rev_matching = sum(1 for w in adv_content if w in sent_content_set)
+                    rev_overlap = rev_matching / len(adv_content) if adv_content else 0
+                    # Use the minimum of both directions to prevent false positives
+                    overlap = min(fwd_overlap, rev_overlap)
                     if overlap > best_adv_ratio:
                         best_adv_ratio = overlap
                         best_adv_rw = adv_rw
