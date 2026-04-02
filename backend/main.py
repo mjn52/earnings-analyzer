@@ -1619,7 +1619,12 @@ def _export_word_improved(
                 # Overwrite — bull/bear takes priority
                 _passage_rewrites[norm_key] = rewrite
                 case_type = rw.get("case_type", "bear").title()
-                thesis_short = rw.get("case_thesis", "")[:60]
+                thesis_full = rw.get("case_thesis", "")
+                if len(thesis_full) > 80:
+                    # Truncate at last word boundary before 80 chars, add ellipsis
+                    thesis_short = thesis_full[:80].rsplit(" ", 1)[0] + "…"
+                else:
+                    thesis_short = thesis_full
                 annotation = f"Bull/Bear: {case_type} — {thesis_short}{also_note}"
                 _rewrite_annotations[norm_key] = annotation
                 _bb_merged += 1
