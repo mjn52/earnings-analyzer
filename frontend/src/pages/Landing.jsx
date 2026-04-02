@@ -128,6 +128,7 @@ export default function Landing() {
             <a href="#how-it-works" className="transition-colors hover:text-text-main">How It Works</a>
             <a href="#what-it-analyzes" className="transition-colors hover:text-text-main">What It Analyzes</a>
             <a href="#security" className="transition-colors hover:text-text-main">Security</a>
+            <Link to="/pricing" className="transition-colors hover:text-text-main">Pricing</Link>
           </div>
 
           <div className="flex items-center gap-3">
@@ -415,6 +416,7 @@ export default function Landing() {
             <span className="font-sora text-sm font-bold text-text-main">StreetSignals</span>
           </div>
           <div className="flex items-center gap-6 text-sm text-text-muted">
+            <Link to="/pricing" className="hover:text-primary">Pricing</Link>
             <Link to="/terms" className="hover:text-primary">Terms</Link>
             <Link to="/privacy" className="hover:text-primary">Privacy</Link>
           </div>
