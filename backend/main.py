@@ -1691,6 +1691,23 @@ def _export_word_improved(
                         and len(norm_sentence) >= len(key) * 0.4):
                     # Sentence is part of a multi-sentence original_text
                     ratio = 0.95
+                elif (len(norm_sentence) > len(key) + 10
+                        and key in norm_sentence
+                        and len(key) >= len(norm_sentence) * 0.4):
+                    # Key (Claude's original_text) is a substring of the
+                    # actual script sentence — Claude quoted only part of it.
+                    # Build a full-sentence rewrite by splicing the rewrite
+                    # into the sentence at the matched position.
+                    idx = norm_sentence.index(key)
+                    prefix = norm_sentence[:idx]
+                    suffix = norm_sentence[idx + len(key):]
+                    spliced_rw = prefix + rw + suffix
+                    # Store the spliced version for this match
+                    if spliced_rw != norm_sentence:
+                        ratio = 0.95
+                        rw = spliced_rw  # local override for this candidate
+                    else:
+                        continue
                 elif abs(len(key) - len(norm_sentence)) > 30:
                     continue
                 else:
@@ -1737,13 +1754,29 @@ def _export_word_improved(
                     sent_content_set = set(sent_content)
                     rev_matching = sum(1 for w in adv_content if w in sent_content_set)
                     rev_overlap = rev_matching / len(adv_content) if adv_content else 0
-                    # Use the minimum of both directions to prevent false positives
-                    overlap = min(fwd_overlap, rev_overlap)
+                    # When the sentence is significantly longer than the original,
+                    # Claude likely quoted only part of the sentence — use reverse
+                    # overlap (how much of the original is in the sentence) as the
+                    # primary signal.  Otherwise use min of both directions.
+                    if len(sent_content) > len(adv_content) * 1.3 and rev_overlap > 0.85:
+                        overlap = rev_overlap
+                    else:
+                        overlap = min(fwd_overlap, rev_overlap)
                     if overlap > best_adv_ratio:
                         best_adv_ratio = overlap
                         best_adv_rw = adv_rw
                         best_adv_key = adv_norm
                 if best_adv_ratio > 0.8:
+                    # If key is a substring of the sentence, splice the
+                    # rewrite into the full sentence to avoid deleting the
+                    # unmatched tail/head.
+                    if (best_adv_key
+                            and len(norm_sentence) > len(best_adv_key) + 10
+                            and best_adv_key in norm_sentence):
+                        idx = norm_sentence.index(best_adv_key)
+                        prefix = norm_sentence[:idx]
+                        suffix = norm_sentence[idx + len(best_adv_key):]
+                        best_adv_rw = prefix + best_adv_rw + suffix
                     rewrite = best_adv_rw
                     matched_key = best_adv_key
                     _word_overlap_hits += 1
@@ -1876,49 +1909,8 @@ def _export_word_improved(
                 _unmatched_act.append((orig, rewrite, annotation, item))
 
     # --- Negative Interpretation Rewrites ---
-    neg_interps_all = claude_analysis.get("negative_interpretations", []) if claude_analysis else []
-    if neg_interps_all:
-        doc.add_paragraph()
-        doc.add_paragraph("\u2500" * 50)
-        doc.add_heading("Negative Interpretation Rewrites", level=1)
-        doc.add_paragraph(
-            "Passages that bearish analysts could spin negatively, with suggested rewrites."
-        ).italic = True
-        doc.add_paragraph()
-
-        for ni in neg_interps_all:
-            orig = ni.get("original_text", "")
-            rewrite = ni.get("suggested_rewrite", "")
-            category = ni.get("category", "negative interpretation").replace("_", " ").title()
-            severity = ni.get("severity", "medium").upper()
-            neg_spin = ni.get("negative_spin", "")
-            label = f"Neg Interp: {category} [{severity}]"
-
-            if orig and rewrite and rewrite != orig:
-                norm_key = ' '.join(orig.split())
-                if norm_key in _inline_rendered:
-                    # Use exact sentence + rewrite from the script body
-                    for actual_sentence, actual_rewrite in _inline_rendered[norm_key]:
-                        _render_rewrite_item(doc, actual_sentence, actual_rewrite, label)
-                else:
-                    _render_rewrite_item(doc, orig, rewrite, label)
-            elif orig:
-                # No rewrite but still show the flagged passage
-                para = doc.add_paragraph()
-                lbl_run = para.add_run(f"[{category} — {severity}]  ")
-                lbl_run.font.size = Pt(9)
-                lbl_run.font.bold = True
-                lbl_run.font.color.rgb = RGBColor(128, 128, 128)
-                run = para.add_run(orig)
-                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-                doc.add_paragraph()
-
-            if neg_spin:
-                spin_para = doc.add_paragraph()
-                spin_run = spin_para.add_run(f"Bear narrative: {neg_spin}")
-                spin_run.font.size = Pt(9)
-                spin_run.font.italic = True
-                spin_run.font.color.rgb = RGBColor(128, 128, 128)
+    # (These rewrites are rendered inline in the script body above.
+    #  No separate section needed — see _passage_rewrites merge at ~line 1557.)
 
     # --- Litigation Risk Analysis Summary ---
     if advanced:
@@ -1998,76 +1990,8 @@ def _export_word_improved(
                         quote_run.font.size = Pt(9)
 
         # --- Activist Vulnerability Summary ---
-        if claude_analysis and "activist_triggers" in claude_analysis:
-            activist_triggers = claude_analysis["activist_triggers"]
-        else:
-            act = advanced.get("activist_triggers", {})
-            raw_triggers = act.get("triggers", [])
-            activist_triggers = []
-            for t in raw_triggers:
-                category = (t.get("trigger", "") or "").replace("_", " ").title()
-                if not category.strip():
-                    continue
-                activist_triggers.append({
-                    "category": category,
-                    "original_text": t.get("sentence", t.get("matched_text", "")),
-                    "severity": t.get("severity", "medium"),
-                })
-
-        if activist_triggers:
-            doc.add_paragraph()
-            doc.add_paragraph("\u2500" * 50)
-            doc.add_heading("Activist Vulnerability Summary", level=1)
-
-            # Risk level
-            if any(t.get("severity", "").lower() == "high" for t in activist_triggers):
-                risk_level = "High"
-            elif len(activist_triggers) >= 3:
-                risk_level = "Medium"
-            else:
-                risk_level = "Low"
-            doc.add_paragraph(f"Overall Risk: {risk_level}  ({len(activist_triggers)} trigger{'s' if len(activist_triggers) != 1 else ''})")
-            doc.add_paragraph()
-
-            # Show each trigger with its rewrite
-            for t in activist_triggers:
-                severity = t.get("severity", "medium").upper()
-                category = t.get("category", "Trigger")
-                orig = t.get("original_text", "")
-                rewrite = t.get("suggested_rewrite", "")
-                label = f"Activist: {category} [{severity}]"
-
-                if orig and rewrite and rewrite != orig:
-                    norm_key = ' '.join(orig.split())
-                    if norm_key in _inline_rendered:
-                        for actual_sentence, actual_rewrite in _inline_rendered[norm_key]:
-                            _render_rewrite_item(doc, actual_sentence, actual_rewrite, label)
-                    else:
-                        _render_rewrite_item(doc, orig, rewrite, label)
-                else:
-                    # No rewrite — show the trigger as a bullet
-                    bullet = doc.add_paragraph(style="List Bullet")
-                    sev_run = bullet.add_run(f"[{severity}] ")
-                    sev_run.font.size = Pt(9)
-                    if severity == "HIGH":
-                        sev_run.font.color.rgb = RGBColor(220, 38, 38)
-                    elif severity == "MEDIUM":
-                        sev_run.font.color.rgb = RGBColor(217, 119, 6)
-                    else:
-                        sev_run.font.color.rgb = RGBColor(107, 114, 128)
-                    bullet.add_run(category)
-                    if orig:
-                        quote_para = doc.add_paragraph()
-                        quote_run = quote_para.add_run(f'"{orig}"')
-                        quote_run.font.italic = True
-                        quote_run.font.size = Pt(9)
-                    narrative = t.get("activist_narrative", "")
-                    if narrative:
-                        narr_para = doc.add_paragraph()
-                        narr_run = narr_para.add_run(f"Activist narrative: {narrative}")
-                        narr_run.font.size = Pt(9)
-                        narr_run.font.italic = True
-                        narr_run.font.color.rgb = RGBColor(128, 128, 128)
+        # (These rewrites are rendered inline in the script body above.
+        #  No separate section needed — see _passage_rewrites merge at ~line 1587.)
 
     doc.save(str(output_path))
     return output_path
