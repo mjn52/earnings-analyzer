@@ -287,7 +287,7 @@ async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[di
             parts.append("")
 
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=16000,
             system=_REWRITE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "\n".join(parts)}],
@@ -482,7 +482,7 @@ async def _generate_analysis_with_claude(
         parts.append("\nAnalyze this script and return ALL FOUR parts as specified: negative interpretations, guidance extraction, litigation findings validation, and activist trigger validation.")
 
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=6000,
             system=_ANALYSIS_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "\n".join(parts)}],
@@ -598,7 +598,7 @@ async def _generate_bull_bear_with_claude(
         )
 
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=8000,
             system=_BULL_BEAR_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
@@ -948,7 +948,7 @@ async def _generate_qa_with_claude(
 
         # Call Claude (API data is never used for training per Anthropic's API terms)
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             system=_QA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
@@ -2103,7 +2103,7 @@ async def test_claude():
     try:
         client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=50,
             messages=[{"role": "user", "content": "Say hello in exactly 5 words."}],
         )
