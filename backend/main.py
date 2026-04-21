@@ -517,7 +517,14 @@ async def _generate_analysis_with_claude(
         }
 
     except json.JSONDecodeError as e:
-        logger.error(f"Claude analysis JSON parse error: {e}")
+        # Dump a window around the error position so we can see what Claude actually returned
+        _window_start = max(0, e.pos - 80)
+        _window_end = min(len(response_text), e.pos + 80)
+        logger.error(
+            f"Claude analysis JSON parse error: {e}\n"
+            f"  Response length: {len(response_text)} chars\n"
+            f"  Near error (chars {_window_start}-{_window_end}): {response_text[_window_start:_window_end]!r}"
+        )
         return None
     except Exception as e:
         logger.error(f"Claude analysis generation failed: {type(e).__name__}: {e}")
