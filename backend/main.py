@@ -584,24 +584,55 @@ For each bull case, find sentences that could more strongly reinforce the bull t
 
 For each rewrite, quote the EXACT original sentence from the script and provide an improved version. The rewrite should sound natural for an executive delivering an earnings call — authoritative, specific, and confident without being legally reckless.
 
-Return ONLY valid JSON (no markdown, no code fences):
-{
-  "bull_cases": [
-    {"thesis": "one-sentence bull thesis", "explanation": "2-3 sentence explanation"}
-  ],
-  "bear_cases": [
-    {"thesis": "one-sentence bear thesis", "explanation": "2-3 sentence explanation"}
-  ],
-  "rewrites": [
-    {
-      "original_text": "exact quote from the script",
-      "suggested_rewrite": "improved version of the sentence",
-      "case_type": "bull" or "bear",
-      "case_thesis": "the one-sentence thesis this rewrite addresses",
-      "rationale": "one sentence explaining why this change matters"
-    }
-  ]
-}"""
+Emit your analysis via the `emit_bull_bear` tool."""
+
+
+_BULL_BEAR_TOOL = {
+    "name": "emit_bull_bear",
+    "description": "Emit bull/bear cases and proposed script rewrites. Call exactly once.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "bull_cases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "thesis": {"type": "string"},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["thesis", "explanation"],
+                },
+            },
+            "bear_cases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "thesis": {"type": "string"},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["thesis", "explanation"],
+                },
+            },
+            "rewrites": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original_text": {"type": "string"},
+                        "suggested_rewrite": {"type": "string"},
+                        "case_type": {"type": "string", "enum": ["bull", "bear"]},
+                        "case_thesis": {"type": "string"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["original_text", "suggested_rewrite", "case_type", "case_thesis", "rationale"],
+                },
+            },
+        },
+        "required": ["bull_cases", "bear_cases", "rewrites"],
+    },
+}
 
 
 async def _generate_bull_bear_with_claude(
@@ -639,18 +670,17 @@ async def _generate_bull_bear_with_claude(
             model="claude-sonnet-4-6",
             max_tokens=8000,
             system=_BULL_BEAR_SYSTEM_PROMPT,
+            tools=[_BULL_BEAR_TOOL],
+            tool_choice={"type": "tool", "name": "emit_bull_bear"},
             messages=[{"role": "user", "content": user_message}],
         )
 
-        response_text = response.content[0].text.strip()
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+        if tool_use is None:
+            logger.error(f"Claude bull/bear: no tool_use block (stop_reason={response.stop_reason})")
+            return None
 
-        # Handle markdown code fences
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-            response_text = re.sub(r"\s*```$", "", response_text)
-
-        data = json.loads(response_text)
-
+        data = tool_use.input
         bull_cases = data.get("bull_cases", [])
         bear_cases = data.get("bear_cases", [])
         rewrites = data.get("rewrites", [])
@@ -891,26 +921,44 @@ ANSWER GUIDELINES:
 - Flag areas where management should have data ready but shouldn't speculate
 - When prior Q&A is available, proactively address known analyst concerns rather than waiting to be asked
 
-Return ONLY valid JSON in this exact format (no markdown, no code fences):
-{
-  "questions": [
-    {
-      "question": "The specific analyst question",
-      "topic": "Short topic label (e.g., Revenue, Margins, Guidance)",
-      "confidence": 0.85
-    }
-  ],
-  "answers": [
-    {
-      "answer_strategy": "Short strategy label (e.g., Redirect to Data, Acknowledge & Pivot)",
-      "proposed_answer": "The full proposed management response",
-      "key_data_points": ["Data point 1 to have ready", "Data point 2"],
-      "caution_notes": "What to avoid saying or any risk in this area"
-    }
-  ]
-}
+Emit your Q&A via the `emit_qa` tool. Generate 8-10 questions ordered by likelihood of being asked. The questions and answers arrays must have the same length — one answer per question, same index."""
 
-Generate 8-10 questions, ordered by likelihood of being asked. The questions and answers arrays must have the same length (one answer per question)."""
+
+_QA_TOOL = {
+    "name": "emit_qa",
+    "description": "Emit the predicted analyst Q&A. Call exactly once with matched questions and answers arrays (same length, one answer per question).",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "topic": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["question", "topic", "confidence"],
+                },
+            },
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "answer_strategy": {"type": "string"},
+                        "proposed_answer": {"type": "string"},
+                        "key_data_points": {"type": "array", "items": {"type": "string"}},
+                        "caution_notes": {"type": "string"},
+                    },
+                    "required": ["answer_strategy", "proposed_answer", "key_data_points", "caution_notes"],
+                },
+            },
+        },
+        "required": ["questions", "answers"],
+    },
+}
 
 
 async def _generate_qa_with_claude(
@@ -989,24 +1037,22 @@ async def _generate_qa_with_claude(
             model="claude-sonnet-4-6",
             max_tokens=12000,
             system=_QA_SYSTEM_PROMPT,
+            tools=[_QA_TOOL],
+            tool_choice={"type": "tool", "name": "emit_qa"},
             messages=[{"role": "user", "content": user_prompt}],
         )
 
         if response.stop_reason == "max_tokens":
             logger.warning(
-                f"Claude Q&A response hit max_tokens ceiling — raise max_tokens if this recurs"
+                "Claude Q&A response hit max_tokens ceiling — raise max_tokens if this recurs"
             )
 
-        # Parse the JSON response
-        response_text = response.content[0].text.strip()
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+        if tool_use is None:
+            logger.error(f"Claude Q&A: no tool_use block in response (stop_reason={response.stop_reason})")
+            return None
 
-        # Handle potential markdown code fences
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-            response_text = re.sub(r"\s*```$", "", response_text)
-
-        qa_data = json.loads(response_text)
-
+        qa_data = tool_use.input
         questions = qa_data.get("questions", [])
         answers = qa_data.get("answers", [])
 
