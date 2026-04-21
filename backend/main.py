@@ -1332,6 +1332,7 @@ def _build_response(
     consensus: Optional[dict] = None,
     prior_comparison: Optional[dict] = None,
     claude_bull_bear: Optional[dict] = None,
+    ai_status: Optional[dict] = None,
 ) -> dict:
     """Assemble the spec-compliant JSON response."""
     flagged_passages = base_analysis.get("flagged_passages", [])
@@ -1386,6 +1387,7 @@ def _build_response(
         } if claude_bull_bear else None,
         "prior_comparison": prior_comparison,
         "session_id": session_id,
+        "ai_status": ai_status or {"api_configured": False, "degraded_services": [], "degraded": False},
         "_debug": {
             "flagged_passage_count": len(flagged_passages),
             "claude_rewrites_is_none": claude_rewrites is None,
@@ -2318,6 +2320,34 @@ async def analyze(
     else:
         logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
         claude_bull_bear = None
+        flagged_for_rewrite = []
+
+    # Build AI status so the UI can surface degraded modes instead of silently
+    # serving regex-template output when a Claude call fails.
+    _has_ticker = bool(ticker and ticker.strip())
+    _expected = {
+        "qa": True,
+        "rewrites": len(flagged_for_rewrite) > 0 if ANTHROPIC_API_KEY else False,
+        "analysis": True,
+        "bull_bear": _has_ticker,
+    }
+    _succeeded = {
+        "qa": claude_qa is not None,
+        "rewrites": claude_rewrites is not None,
+        "analysis": claude_analysis is not None,
+        "bull_bear": claude_bull_bear is not None,
+    }
+    _degraded_services = [
+        name for name, expected in _expected.items()
+        if expected and not _succeeded[name]
+    ]
+    ai_status = {
+        "api_configured": bool(ANTHROPIC_API_KEY),
+        "degraded_services": _degraded_services,
+        "degraded": bool(ANTHROPIC_API_KEY) and len(_degraded_services) > 0,
+    }
+    if ai_status["degraded"]:
+        logger.warning(f"AI degraded — falling back to templates for: {_degraded_services}")
 
     # Score prior transcripts for comparison (fast — no Claude calls needed)
     prior_scored = []
@@ -2349,13 +2379,14 @@ async def analyze(
         "claude_bull_bear": claude_bull_bear,
         "consensus": consensus,
         "prior_comparison": prior_comparison,
+        "ai_status": ai_status,
         "ticker": ticker.strip().upper() if ticker and ticker.strip() else None,
     }
 
     return _build_response(
         transcript, base_analysis, advanced, session_id,
         claude_qa, claude_rewrites, claude_analysis, consensus,
-        prior_comparison, claude_bull_bear,
+        prior_comparison, claude_bull_bear, ai_status,
     )
 
 
@@ -2420,6 +2451,8 @@ async def get_json(session_id: str):
         session.get("claude_analysis"),
         session.get("consensus"),
         session.get("prior_comparison"),
+        session.get("claude_bull_bear"),
+        session.get("ai_status"),
     )
 
 

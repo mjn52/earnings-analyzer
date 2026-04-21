@@ -274,7 +274,20 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, bull_bear_cases, prior_comparison, session_id } = results
+    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, bull_bear_cases, prior_comparison, session_id, ai_status } = results
+
+    const SERVICE_LABELS = { qa: 'Analyst Q&A', rewrites: 'Sentence rewrites', analysis: 'Risk analysis', bull_bear: 'Bull/Bear cases' }
+    const aiBanner = (() => {
+      if (!ai_status) return null
+      if (!ai_status.api_configured) {
+        return { tone: 'red', title: 'AI analysis unavailable', detail: 'The server is not configured with an Anthropic API key — all sections below are showing template output, not AI-generated analysis.' }
+      }
+      if (ai_status.degraded && ai_status.degraded_services?.length) {
+        const names = ai_status.degraded_services.map((s) => SERVICE_LABELS[s] || s).join(', ')
+        return { tone: 'amber', title: 'Some AI features unavailable', detail: `${names} failed and fell back to template output. Results in these sections may be generic — try re-running the analysis, or check server logs if the issue persists.` }
+      }
+      return null
+    })()
 
     const tabCounts = {
       flagged: flagged_issues?.length || 0,
@@ -298,6 +311,25 @@ export default function Analyzer() {
         </header>
 
         <main className="mx-auto max-w-5xl px-6 py-10">
+          {aiBanner && (
+            <div
+              role="alert"
+              className={`mb-6 flex items-start gap-3 rounded-lg border px-4 py-3 text-sm ${
+                aiBanner.tone === 'red'
+                  ? 'border-red-200 bg-red-50 text-red-900'
+                  : 'border-amber-200 bg-amber-50 text-amber-900'
+              }`}
+            >
+              <svg className="mt-0.5 h-5 w-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <div className="font-semibold">{aiBanner.title}</div>
+                <div className="mt-0.5">{aiBanner.detail}</div>
+              </div>
+            </div>
+          )}
+
           {/* Overall Score Hero */}
           <div className="flex justify-center">
             <div className="relative">
