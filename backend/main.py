@@ -382,46 +382,79 @@ You will be given a list of pattern-matched activist vulnerability triggers. For
 - Provide a defense suggestion specific to the actual concern
 CRITICAL: For each validated trigger, you MUST provide a "suggested_rewrite" — a revised version of the original_text that defuses the activist concern while preserving the intended business message. This rewrite will appear as tracked changes in the Word document.
 
-Return ONLY valid JSON in this exact format (no markdown, no code fences):
-{
-  "negative_interpretations": [
-    {
-      "category": "hedging_language",
-      "original_text": "exact quote from script",
-      "negative_spin": "How a bear analyst would frame this",
-      "suggested_rewrite": "Improved version that neutralizes the spin",
-      "severity": "medium"
-    }
-  ],
-  "guidance_metrics": [
-    {
-      "metric": "Revenue",
-      "value": "$4.2B - $4.4B",
-      "quantified": true,
-      "quote": "We expect revenue in the range of $4.2 billion to $4.4 billion"
-    }
-  ],
-  "litigation_findings": [
-    {
-      "issue": "Specific issue description",
-      "detail": "Why this is a legal risk",
-      "original_text": "exact quote from script",
-      "suggested_rewrite": "Revised text that mitigates the legal risk",
-      "recommendation": "Specific actionable recommendation tied to this text",
-      "severity": "High"
-    }
-  ],
-  "activist_triggers": [
-    {
-      "category": "Capital Allocation",
-      "original_text": "exact quote from script",
-      "suggested_rewrite": "Revised text that defuses the activist concern",
-      "activist_narrative": "How an activist would frame this",
-      "defense_suggestion": "Specific defense for this concern",
-      "severity": "medium"
-    }
-  ]
-}"""
+Emit your analysis by calling the `emit_analysis` tool with all four fields (negative_interpretations, guidance_metrics, litigation_findings, activist_triggers). Every string field must contain ONLY the value itself — do not append parenthetical clarifications like '(in context: ...)' to string values; if context is needed, put it in the appropriate separate field."""
+
+
+# Tool schema — forces Claude to return structured JSON that can't be malformed.
+# Every free-form field is a plain string; context goes in its own field so the
+# model can't smuggle extra structure inside a string and break parsing.
+_ANALYSIS_TOOL = {
+    "name": "emit_analysis",
+    "description": "Emit the earnings call analysis in structured form. Call this exactly once with all four arrays populated.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "negative_interpretations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                        "original_text": {"type": "string", "description": "Exact quote from the script — no parentheticals, no commentary."},
+                        "negative_spin": {"type": "string"},
+                        "suggested_rewrite": {"type": "string"},
+                        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    },
+                    "required": ["category", "original_text", "negative_spin", "suggested_rewrite", "severity"],
+                },
+            },
+            "guidance_metrics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "metric": {"type": "string"},
+                        "value": {"type": "string"},
+                        "quantified": {"type": "boolean"},
+                        "quote": {"type": "string"},
+                    },
+                    "required": ["metric", "value", "quantified", "quote"],
+                },
+            },
+            "litigation_findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "issue": {"type": "string"},
+                        "detail": {"type": "string"},
+                        "original_text": {"type": "string"},
+                        "suggested_rewrite": {"type": "string"},
+                        "recommendation": {"type": "string"},
+                        "severity": {"type": "string", "enum": ["Low", "Medium", "High"]},
+                    },
+                    "required": ["issue", "detail", "original_text", "suggested_rewrite", "recommendation", "severity"],
+                },
+            },
+            "activist_triggers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                        "original_text": {"type": "string"},
+                        "suggested_rewrite": {"type": "string"},
+                        "activist_narrative": {"type": "string"},
+                        "defense_suggestion": {"type": "string"},
+                        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    },
+                    "required": ["category", "original_text", "suggested_rewrite", "activist_narrative", "defense_suggestion", "severity"],
+                },
+            },
+        },
+        "required": ["negative_interpretations", "guidance_metrics", "litigation_findings", "activist_triggers"],
+    },
+}
 
 
 async def _generate_analysis_with_claude(
@@ -485,17 +518,17 @@ async def _generate_analysis_with_claude(
             model="claude-sonnet-4-6",
             max_tokens=6000,
             system=_ANALYSIS_SYSTEM_PROMPT,
+            tools=[_ANALYSIS_TOOL],
+            tool_choice={"type": "tool", "name": "emit_analysis"},
             messages=[{"role": "user", "content": "\n".join(parts)}],
         )
 
-        response_text = response.content[0].text.strip()
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+        if tool_use is None:
+            logger.error(f"Claude analysis: no tool_use block in response (stop_reason={response.stop_reason})")
+            return None
 
-        # Handle markdown code fences
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-            response_text = re.sub(r"\s*```$", "", response_text)
-
-        data = json.loads(response_text)
+        data = tool_use.input
 
         neg_interps = data.get("negative_interpretations", [])
         guidance = data.get("guidance_metrics", [])
@@ -517,13 +550,11 @@ async def _generate_analysis_with_claude(
         }
 
     except json.JSONDecodeError as e:
-        # Dump a window around the error position so we can see what Claude actually returned
-        _window_start = max(0, e.pos - 80)
-        _window_end = min(len(response_text), e.pos + 80)
+        # Structured tool-use should eliminate this class of error. If it recurs
+        # the error will point at Anthropic's own serialization, which is a bug
+        # on their side — log what we can and fall back.
         logger.error(
-            f"Claude analysis JSON parse error: {e}\n"
-            f"  Response length: {len(response_text)} chars\n"
-            f"  Near error (chars {_window_start}-{_window_end}): {response_text[_window_start:_window_end]!r}"
+            f"Claude analysis JSON parse error: {e} — unexpected with tool-use mode"
         )
         return None
     except Exception as e:
