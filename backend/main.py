@@ -949,10 +949,15 @@ async def _generate_qa_with_claude(
         # Call Claude (API data is never used for training per Anthropic's API terms)
         response = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4000,
+            max_tokens=12000,
             system=_QA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
+
+        if response.stop_reason == "max_tokens":
+            logger.warning(
+                f"Claude Q&A response hit max_tokens ceiling — raise max_tokens if this recurs"
+            )
 
         # Parse the JSON response
         response_text = response.content[0].text.strip()
