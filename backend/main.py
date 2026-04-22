@@ -2260,6 +2260,18 @@ async def debug_session(session_id: str):
 # spinner for 45-60s.
 # ---------------------------------------------------------------------------
 
+# Hold a strong reference to background tasks so Python's GC doesn't reclaim
+# them mid-execution. Per Python docs: asyncio.create_task() only returns a
+# weak reference; without this set the task can silently disappear.
+_BACKGROUND_TASKS: set = set()
+
+
+def _spawn_background(coro):
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
 
 async def _extract_transcript(file: Optional[UploadFile], text: Optional[str]) -> str:
     """Pull transcript text from a file upload or form text field."""
@@ -2294,6 +2306,7 @@ async def _run_claude_analyses_background(
     frontend can show real per-call progress.
     """
     session = SESSIONS[session_id]
+    logger.info(f"Background task started for session {session_id} (ticker={ticker})")
     try:
         # ----- Fetch prior transcripts + consensus (ticker-gated) -----
         prior_transcripts: list = []
@@ -2498,7 +2511,7 @@ async def analyze_start(
         "ai_status": None,
     }
 
-    asyncio.create_task(
+    _spawn_background(
         _run_claude_analyses_background(session_id, transcript, ticker, base_analysis, advanced)
     )
 
@@ -2534,19 +2547,23 @@ async def analyze_result(session_id: str):
     if session.get("status") != "complete":
         raise HTTPException(status_code=409, detail="Analysis still running")
 
-    return _build_response(
-        session["text"],
-        session["base_analysis"],
-        session["advanced"],
-        session_id,
-        session.get("claude_qa"),
-        session.get("claude_rewrites"),
-        session.get("claude_analysis"),
-        session.get("consensus"),
-        session.get("prior_comparison"),
-        session.get("claude_bull_bear"),
-        session.get("ai_status"),
-    )
+    try:
+        return _build_response(
+            session["text"],
+            session["base_analysis"],
+            session["advanced"],
+            session_id,
+            session.get("claude_qa"),
+            session.get("claude_rewrites"),
+            session.get("claude_analysis"),
+            session.get("consensus"),
+            session.get("prior_comparison"),
+            session.get("claude_bull_bear"),
+            session.get("ai_status"),
+        )
+    except Exception as e:
+        logger.exception(f"_build_response failed for session {session_id}")
+        raise HTTPException(status_code=500, detail=f"Result assembly failed: {type(e).__name__}: {e}")
 
 
 @app.post("/api/analyze")
