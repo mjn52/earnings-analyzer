@@ -204,12 +204,14 @@ export default function Analyzer() {
   const [activeTab, setActiveTab] = useState('flagged')
   const [dragOver, setDragOver] = useState(false)
   const [uploadedFile, setUploadedFile] = useState(null)
+  const [progress, setProgress] = useState(null)
   const fileRef = useRef(null)
 
   const ALLOWED_EXTS = ['txt', 'docx', 'md', 'pdf']
 
   const handleAnalyze = useCallback(async () => {
     setLoading(true)
+    setProgress({ progress: {}, timings: {}, elapsed_ms: 0, status: 'running' })
     try {
       const formData = new FormData()
       if (uploadedFile) {
@@ -221,23 +223,43 @@ export default function Analyzer() {
         formData.append('ticker', ticker.trim().toUpperCase())
       }
 
-      const res = await fetch('/api/analyze', {
+      const startRes = await fetch('/api/analyze/start', {
         method: 'POST',
         body: formData,
       })
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to start analysis')
+      }
+      const { session_id } = await startRes.json()
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || 'Analysis failed')
+      // Poll status until complete or failed. Cap at ~5 minutes.
+      const deadline = Date.now() + 5 * 60 * 1000
+      let status = 'running'
+      while (status === 'running') {
+        if (Date.now() > deadline) throw new Error('Analysis timed out after 5 minutes')
+        await new Promise((r) => setTimeout(r, 800))
+        const statusRes = await fetch(`/api/analyze/status/${session_id}`)
+        if (!statusRes.ok) throw new Error('Lost connection to analysis')
+        const snapshot = await statusRes.json()
+        setProgress(snapshot)
+        status = snapshot.status
+        if (status === 'failed') throw new Error(snapshot.error || 'Analysis failed')
       }
 
-      const data = await res.json()
+      const resultRes = await fetch(`/api/analyze/result/${session_id}`)
+      if (!resultRes.ok) {
+        const err = await resultRes.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to fetch results')
+      }
+      const data = await resultRes.json()
       setResults(data)
       setActiveTab('flagged')
     } catch (err) {
       alert(err.message)
     } finally {
       setLoading(false)
+      setProgress(null)
     }
   }, [text, ticker, uploadedFile])
 
@@ -531,8 +553,102 @@ export default function Analyzer() {
               Minimum 100 characters required ({100 - text.length} more needed)
             </p>
           )}
+
+          {loading && progress && <AnalysisProgress progress={progress} />}
         </div>
       </main>
     </div>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/*  AnalysisProgress — live per-call status while /api/analyze runs    */
+/* ------------------------------------------------------------------ */
+
+const PROGRESS_LABELS = {
+  qa: 'Analyst Q&A',
+  rewrites: 'Sentence rewrites',
+  analysis: 'Risk analysis',
+  bull_bear: 'Bull / Bear cases',
+}
+
+const PROGRESS_ORDER = ['qa', 'rewrites', 'analysis', 'bull_bear']
+
+function AnalysisProgress({ progress }) {
+  const items = progress?.progress || {}
+  const timings = progress?.timings || {}
+  const elapsed = Math.round((progress?.elapsed_ms || 0) / 1000)
+
+  return (
+    <div className="mt-6 rounded-xl border border-border bg-white p-4">
+      <div className="mb-3 flex items-center justify-between text-xs text-text-muted">
+        <span className="font-semibold uppercase tracking-wider">Analyzing</span>
+        <span className="font-mono">{elapsed}s</span>
+      </div>
+      <ul className="space-y-2">
+        {PROGRESS_ORDER.map((key) => {
+          const state = items[key] || 'pending'
+          const time = timings[key]
+          return (
+            <li key={key} className="flex items-center gap-3 text-sm">
+              <ProgressIcon state={state} />
+              <span
+                className={
+                  state === 'complete'
+                    ? 'text-text-main'
+                    : state === 'failed'
+                    ? 'text-danger'
+                    : state === 'running'
+                    ? 'text-text-main'
+                    : state === 'skipped'
+                    ? 'text-text-muted/60'
+                    : 'text-text-muted'
+                }
+              >
+                {PROGRESS_LABELS[key]}
+              </span>
+              {state === 'complete' && time != null && (
+                <span className="font-mono text-xs text-text-muted">{(time / 1000).toFixed(1)}s</span>
+              )}
+              {state === 'failed' && <span className="text-xs text-danger">failed</span>}
+              {state === 'skipped' && <span className="text-xs text-text-muted/60">(skipped)</span>}
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+function ProgressIcon({ state }) {
+  if (state === 'complete') {
+    return (
+      <svg className="h-4 w-4 flex-shrink-0 text-success" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+      </svg>
+    )
+  }
+  if (state === 'failed') {
+    return (
+      <svg className="h-4 w-4 flex-shrink-0 text-danger" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    )
+  }
+  if (state === 'running') {
+    return (
+      <svg className="h-4 w-4 flex-shrink-0 animate-spin text-primary" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
+        <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      </svg>
+    )
+  }
+  if (state === 'skipped') {
+    return (
+      <svg className="h-4 w-4 flex-shrink-0 text-text-muted/50" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />
+      </svg>
+    )
+  }
+  return <span className="h-4 w-4 flex-shrink-0 rounded-full border-2 border-border" />
 }

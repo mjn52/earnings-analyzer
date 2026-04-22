@@ -9,6 +9,7 @@ import asyncio
 import re
 import difflib
 import logging
+import time
 from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -2251,6 +2252,301 @@ async def debug_session(session_id: str):
         "matched_rewrites": match_count,
         "claude_qa_source": session.get("claude_qa", {}).get("source", "fallback") if session.get("claude_qa") else "fallback",
     }
+
+
+# ---------------------------------------------------------------------------
+# Async analyze flow: start → poll status → fetch result
+# Lets the UI show real per-Claude-call progress instead of a single blocking
+# spinner for 45-60s.
+# ---------------------------------------------------------------------------
+
+
+async def _extract_transcript(file: Optional[UploadFile], text: Optional[str]) -> str:
+    """Pull transcript text from a file upload or form text field."""
+    if file is not None:
+        raw = await file.read()
+        fname = (file.filename or "").lower()
+        if fname.endswith(".docx"):
+            import io
+            from docx import Document
+            doc = Document(io.BytesIO(raw))
+            return "\n".join(p.text for p in doc.paragraphs)
+        if fname.endswith(".pdf"):
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        return raw.decode("utf-8", errors="replace")
+    return text or ""
+
+
+async def _run_claude_analyses_background(
+    session_id: str,
+    transcript: str,
+    ticker: Optional[str],
+    base_analysis: dict,
+    advanced: dict,
+):
+    """
+    Run all non-instant work (prior-transcript fetch, consensus fetch, 4 Claude
+    calls, prior_comparison scoring) in the background. Updates
+    SESSIONS[session_id]["progress"] as each Claude call resolves so the
+    frontend can show real per-call progress.
+    """
+    session = SESSIONS[session_id]
+    try:
+        # ----- Fetch prior transcripts + consensus (ticker-gated) -----
+        prior_transcripts: list = []
+        consensus = None
+        if ticker and ticker.strip():
+            try:
+                prior_transcripts = await _fetch_prior_transcripts(ticker.strip())
+                logger.info(
+                    f"Fetched {len(prior_transcripts)} prior transcripts for {ticker.strip().upper()}"
+                )
+            except Exception as e:
+                logger.error(f"Prior transcript fetch failed: {type(e).__name__}: {e}")
+            try:
+                consensus = await _fetch_consensus_estimates(ticker.strip())
+                if consensus:
+                    logger.info(f"FMP consensus available for {ticker}: date={consensus.get('date')}")
+            except Exception as e:
+                logger.warning(f"Consensus fetch failed: {type(e).__name__}: {e}")
+        session["consensus"] = consensus
+
+        # ----- Build rewrite candidate list (same logic as the sync endpoint) -----
+        flagged_for_rewrite: list = []
+        if ANTHROPIC_API_KEY:
+            flagged_for_rewrite = [
+                {"sentence": fp["sentence"], "issues": fp["issues"]}
+                for fp in base_analysis.get("flagged_passages", [])
+            ]
+            existing_norm = {' '.join(fp["sentence"].split()) for fp in flagged_for_rewrite}
+            all_sentences = re.split(r"(?<=[.!?])\s+", transcript)
+            for sent in all_sentences:
+                if len(sent.strip()) < 10:
+                    continue
+                norm_sent = ' '.join(sent.split())
+                if norm_sent in existing_norm:
+                    continue
+                color, issues = classify_sentence(sent)
+                if color in ("RED", "YELLOW") and issues:
+                    flagged_for_rewrite.append({"sentence": sent, "issues": issues})
+                    existing_norm.add(norm_sent)
+            if len(flagged_for_rewrite) > 80:
+                logger.warning(f"Capping rewrite batch from {len(flagged_for_rewrite)} to 80 sentences")
+                flagged_for_rewrite = flagged_for_rewrite[:80]
+
+        # ----- Kick off the 4 Claude calls, each tracking its own progress -----
+        claude_qa = None
+        claude_rewrites = None
+        claude_analysis = None
+        claude_bull_bear = None
+
+        async def _track(name: str, coro):
+            """Run a Claude call, updating session['progress'][name] as it resolves."""
+            session["progress"][name] = "running"
+            t0 = time.monotonic()
+            try:
+                result = await coro
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                session["progress"][name] = "complete" if result is not None else "failed"
+                session["timings"][name] = elapsed_ms
+                return result
+            except Exception as e:
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                logger.error(f"Claude {name} failed: {type(e).__name__}: {e}")
+                session["progress"][name] = "failed"
+                session["timings"][name] = elapsed_ms
+                return None
+
+        if ANTHROPIC_API_KEY:
+            logger.info(f"Background: starting 4 Claude calls (ticker={ticker})")
+
+            qa_coro = _generate_qa_with_claude(transcript, prior_transcripts, base_analysis)
+            rewrites_coro = _generate_rewrites_with_claude(flagged_for_rewrite)
+            analysis_coro = _generate_analysis_with_claude(
+                transcript,
+                advanced.get("negative_interpretations", []),
+                advanced.get("litigation_risk", {}).get("findings", []),
+                advanced.get("activist_triggers", {}).get("triggers", []),
+            )
+            bull_bear_coro = (
+                _generate_bull_bear_with_claude(transcript, ticker.strip().upper())
+                if ticker and ticker.strip()
+                else None
+            )
+
+            # Run in parallel. Each _track coroutine updates its own progress key
+            # independently, so the frontend sees checkmarks as they land.
+            tasks = [
+                _track("qa", qa_coro),
+                _track("rewrites", rewrites_coro),
+                _track("analysis", analysis_coro),
+            ]
+            if bull_bear_coro is not None:
+                tasks.append(_track("bull_bear", bull_bear_coro))
+
+            results = await asyncio.gather(*tasks)
+            claude_qa = results[0]
+            claude_rewrites = results[1]
+            claude_analysis = results[2]
+            if bull_bear_coro is not None:
+                claude_bull_bear = results[3]
+        else:
+            logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
+
+        # ----- Build ai_status (degradation summary for the UI banner) -----
+        _has_ticker = bool(ticker and ticker.strip())
+        _expected = {
+            "qa": bool(ANTHROPIC_API_KEY),
+            "rewrites": bool(ANTHROPIC_API_KEY) and len(flagged_for_rewrite) > 0,
+            "analysis": bool(ANTHROPIC_API_KEY),
+            "bull_bear": bool(ANTHROPIC_API_KEY) and _has_ticker,
+        }
+        _succeeded = {
+            "qa": claude_qa is not None,
+            "rewrites": claude_rewrites is not None,
+            "analysis": claude_analysis is not None,
+            "bull_bear": claude_bull_bear is not None,
+        }
+        _degraded = [n for n, exp in _expected.items() if exp and not _succeeded[n]]
+        ai_status = {
+            "api_configured": bool(ANTHROPIC_API_KEY),
+            "degraded_services": _degraded,
+            "degraded": bool(ANTHROPIC_API_KEY) and len(_degraded) > 0,
+        }
+        if ai_status["degraded"]:
+            logger.warning(f"AI degraded — falling back to templates for: {_degraded}")
+
+        # ----- Score prior transcripts for comparison -----
+        prior_scored = []
+        if prior_transcripts:
+            for t in prior_transcripts:
+                try:
+                    prior_base = analyze_transcript(t["content"], LM_DICT)
+                    prior_sc = _corrected_scores(prior_base)
+                    prior_scored.append({"quarter": t["quarter"], "scores": prior_sc})
+                except Exception as e:
+                    logger.warning(f"Failed to score prior transcript {t['quarter']}: {e}")
+        prior_comparison = _build_prior_comparison(_corrected_scores(base_analysis), prior_scored)
+
+        # ----- Persist the full result into the session -----
+        session["claude_qa"] = claude_qa
+        session["claude_rewrites"] = claude_rewrites
+        session["claude_analysis"] = claude_analysis
+        session["claude_bull_bear"] = claude_bull_bear
+        session["prior_comparison"] = prior_comparison
+        session["ai_status"] = ai_status
+        session["status"] = "complete"
+        session["completed_at"] = time.monotonic()
+        logger.info(
+            f"Background analysis complete for {session_id} "
+            f"(total {int((session['completed_at'] - session['started_monotonic']) * 1000)}ms)"
+        )
+    except Exception as e:
+        logger.error(f"Background analysis failed for {session_id}: {type(e).__name__}: {e}")
+        session["status"] = "failed"
+        session["error"] = f"{type(e).__name__}: {e}"
+
+
+@app.post("/api/analyze/start")
+async def analyze_start(
+    file: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    ticker: Optional[str] = Form(None),
+):
+    """
+    Start an analysis in the background. Returns a session_id immediately so
+    the UI can begin polling /api/analyze/status/{session_id} for per-call
+    progress, then fetch the full result via /api/analyze/result/{session_id}
+    when status == 'complete'.
+    """
+    transcript = await _extract_transcript(file, text)
+    if not transcript or len(transcript.strip()) < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a transcript of at least 100 characters.",
+        )
+
+    # Fast synchronous base analysis — usually <500ms, fine to block on
+    base_analysis = analyze_transcript(transcript, LM_DICT)
+    advanced = run_advanced_analysis(transcript, base_analysis)
+
+    session_id = str(uuid.uuid4())
+    _has_ticker = bool(ticker and ticker.strip())
+    SESSIONS[session_id] = {
+        "text": transcript,
+        "base_analysis": base_analysis,
+        "advanced": advanced,
+        "ticker": ticker.strip().upper() if _has_ticker else None,
+        "status": "running",
+        "started_monotonic": time.monotonic(),
+        "progress": {
+            "qa": "pending" if ANTHROPIC_API_KEY else "skipped",
+            "rewrites": "pending" if ANTHROPIC_API_KEY else "skipped",
+            "analysis": "pending" if ANTHROPIC_API_KEY else "skipped",
+            "bull_bear": "pending" if (ANTHROPIC_API_KEY and _has_ticker) else "skipped",
+        },
+        "timings": {},
+        "claude_qa": None,
+        "claude_rewrites": None,
+        "claude_analysis": None,
+        "claude_bull_bear": None,
+        "consensus": None,
+        "prior_comparison": None,
+        "ai_status": None,
+    }
+
+    asyncio.create_task(
+        _run_claude_analyses_background(session_id, transcript, ticker, base_analysis, advanced)
+    )
+
+    return {"session_id": session_id, "status": "running"}
+
+
+@app.get("/api/analyze/status/{session_id}")
+async def analyze_status(session_id: str):
+    """Return current progress for each Claude call + overall status."""
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    elapsed_ms = int((time.monotonic() - session.get("started_monotonic", time.monotonic())) * 1000)
+    return {
+        "session_id": session_id,
+        "status": session.get("status", "running"),
+        "progress": session.get("progress", {}),
+        "timings": session.get("timings", {}),
+        "elapsed_ms": elapsed_ms,
+        "error": session.get("error"),
+    }
+
+
+@app.get("/api/analyze/result/{session_id}")
+async def analyze_result(session_id: str):
+    """Return the full analysis result once status == 'complete'."""
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=session.get("error") or "Analysis failed")
+    if session.get("status") != "complete":
+        raise HTTPException(status_code=409, detail="Analysis still running")
+
+    return _build_response(
+        session["text"],
+        session["base_analysis"],
+        session["advanced"],
+        session_id,
+        session.get("claude_qa"),
+        session.get("claude_rewrites"),
+        session.get("claude_analysis"),
+        session.get("consensus"),
+        session.get("prior_comparison"),
+        session.get("claude_bull_bear"),
+        session.get("ai_status"),
+    )
 
 
 @app.post("/api/analyze")
