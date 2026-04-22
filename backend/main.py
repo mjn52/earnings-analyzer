@@ -682,9 +682,24 @@ async def _generate_bull_bear_with_claude(
             return None
 
         data = tool_use.input
-        bull_cases = data.get("bull_cases", [])
-        bear_cases = data.get("bear_cases", [])
-        rewrites = data.get("rewrites", [])
+
+        # Defensive: despite the tool schema declaring objects, the model can
+        # still emit string items under load/edge cases. Drop anything that
+        # isn't a dict so downstream code doesn't crash on rw.get().
+        def _only_dicts(items, label):
+            if not isinstance(items, list):
+                logger.warning(f"Claude bull/bear: {label} was {type(items).__name__}, coercing to []")
+                return []
+            clean = [x for x in items if isinstance(x, dict)]
+            if len(clean) != len(items):
+                logger.warning(
+                    f"Claude bull/bear: dropped {len(items) - len(clean)} non-dict entries from {label}"
+                )
+            return clean
+
+        bull_cases = _only_dicts(data.get("bull_cases", []), "bull_cases")
+        bear_cases = _only_dicts(data.get("bear_cases", []), "bear_cases")
+        rewrites = _only_dicts(data.get("rewrites", []), "rewrites")
 
         logger.info(
             f"Claude bull/bear for {ticker}: {len(bull_cases)} bull cases, "
@@ -788,6 +803,8 @@ def _build_flagged_issues(
     # Append bull/bear defense rewrites as additional flagged issues
     if claude_bull_bear and "rewrites" in claude_bull_bear:
         for rw in claude_bull_bear["rewrites"]:
+            if not isinstance(rw, dict):
+                continue
             orig = rw.get("original_text", "")
             rewrite = rw.get("suggested_rewrite", "")
             case_type = rw.get("case_type", "bear").title()
@@ -1701,6 +1718,8 @@ def _export_word_improved(
     _bb_merged = 0
     if claude_bull_bear and "rewrites" in claude_bull_bear:
         for rw in claude_bull_bear["rewrites"]:
+            if not isinstance(rw, dict):
+                continue
             orig = rw.get("original_text", "")
             rewrite = rw.get("suggested_rewrite", "")
             if orig and rewrite and rewrite != orig:
