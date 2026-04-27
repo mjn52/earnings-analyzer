@@ -2,7 +2,6 @@ import { useState, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import ScoreRing from '../components/ScoreRing'
 import ScoreCard from '../components/ScoreCard'
-import StockImpact from '../components/StockImpact'
 import FlaggedIssue from '../components/FlaggedIssue'
 import AnalystQA from '../components/AnalystQA'
 import LitigationPanel from '../components/LitigationPanel'
@@ -296,7 +295,7 @@ export default function Analyzer() {
 
   // ---- RESULTS VIEW ----
   if (results) {
-    const { scores, stock_impact, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, bull_bear_cases, prior_comparison, session_id, ai_status } = results
+    const { scores, flagged_issues, analyst_qa, negative_interpretations, litigation, activist_triggers, bull_bear_cases, prior_comparison, session_id, ai_status } = results
 
     const SERVICE_LABELS = { qa: 'Analyst Q&A', rewrites: 'Sentence rewrites', analysis: 'Risk analysis', bull_bear: 'Bull/Bear cases' }
     const aiBanner = (() => {
@@ -372,9 +371,6 @@ export default function Analyzer() {
             priorComparison={prior_comparison}
             ticker={ticker}
           />
-
-          {/* Stock Impact Prediction */}
-          <StockImpact data={stock_impact} />
 
           {/* Bull/Bear Case Defense */}
           <BullBearCard data={bull_bear_cases} />

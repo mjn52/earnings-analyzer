@@ -60,14 +60,6 @@ app.add_middleware(
 # Load Loughran-McDonald dictionary once at startup
 LM_DICT = load_lm_dictionary(Path(__file__).parent / "LM_MasterDictionary.csv")
 
-# Load score→price impact lookup table (research-based benchmarks)
-_IMPACT_TABLE_PATH = Path(__file__).parent / "data" / "score_impact_table.json"
-SCORE_IMPACT_TABLE = {}
-if _IMPACT_TABLE_PATH.exists():
-    with open(_IMPACT_TABLE_PATH) as _f:
-        SCORE_IMPACT_TABLE = json.load(_f)
-    logger.info(f"Loaded score impact table ({len(SCORE_IMPACT_TABLE.get('overall_score_bins', {}))} bins)")
-
 # In-memory session store — keyed by session_id
 SESSIONS: dict = {}
 
@@ -156,73 +148,6 @@ def _corrected_scores(base_analysis: dict) -> dict:
         "ownership": ownership,
         "clarity": clarity,
         "red_flags": fixed_red,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Stock Impact Prediction (research-based)
-# ---------------------------------------------------------------------------
-
-def _get_score_bin(score: int) -> str:
-    """Map a 0-100 score to its lookup table bin key."""
-    bin_start = (score // 10) * 10
-    bin_end = min(bin_start + 9, 100)
-    if bin_start >= 90:
-        return "90-100"
-    return f"{bin_start}-{bin_end}"
-
-
-def _predict_impact(scores: dict) -> dict:
-    """
-    Given analysis scores, return predicted stock price impact
-    based on research-derived lookup table.
-
-    Returns both a "current script" prediction and an "improved script"
-    projection so users can see the value of making changes.
-    """
-    bins = SCORE_IMPACT_TABLE.get("overall_score_bins", {})
-    if not bins:
-        return None
-
-    overall = scores.get("overall", 50)
-    bin_key = _get_score_bin(overall)
-    current_bin = bins.get(bin_key)
-
-    if not current_bin:
-        return None
-
-    # Estimate the "improved" score: assume making all suggested changes
-    # lifts the score by 10-15 points (capped at 95)
-    improved_overall = min(95, overall + 12)
-    improved_bin_key = _get_score_bin(improved_overall)
-    improved_bin = bins.get(improved_bin_key, current_bin)
-
-    # Find the weakest dimensions to highlight as improvement opportunities
-    dimensions = ["sentiment", "confidence", "ownership", "clarity", "red_flags"]
-    dim_scores = [(d, scores.get(d, 50)) for d in dimensions]
-    dim_scores.sort(key=lambda x: x[1])
-    weakest = [{"dimension": d, "score": s} for d, s in dim_scores[:3]]
-
-    return {
-        "current": {
-            "overall_score": overall,
-            "bin": bin_key,
-            "label": current_bin.get("label", ""),
-            "median_1d_pct": current_bin["median_1d_pct"],
-            "median_2d_pct": current_bin["median_2d_pct"],
-            "range_1d": [current_bin["p25_1d"], current_bin["p75_1d"]],
-        },
-        "improved": {
-            "overall_score": improved_overall,
-            "bin": improved_bin_key,
-            "label": improved_bin.get("label", ""),
-            "median_1d_pct": improved_bin["median_1d_pct"],
-            "median_2d_pct": improved_bin["median_2d_pct"],
-            "range_1d": [improved_bin["p25_1d"], improved_bin["p75_1d"]],
-        },
-        "improvement_delta_1d": round(improved_bin["median_1d_pct"] - current_bin["median_1d_pct"], 2),
-        "weakest_dimensions": weakest,
-        "disclaimer": SCORE_IMPACT_TABLE.get("disclaimer", "Historical patterns only. Not financial advice."),
     }
 
 
@@ -1485,7 +1410,6 @@ def _build_response(
 
     return {
         "scores": scores,
-        "stock_impact": _predict_impact(scores),
         "flagged_issues": _build_flagged_issues(text, base_analysis, claude_rewrites, claude_bull_bear),
         "analyst_qa": claude_qa if claude_qa else _build_analyst_qa_fallback(advanced),
         "negative_interpretations": neg_interps,
