@@ -35,7 +35,12 @@ from exporters import (
 )
 from advanced_analysis import run_advanced_analysis
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger("streetsignals")
+logger.setLevel(logging.INFO)
 
 app = FastAPI(title="StreetSignals.ai API")
 
@@ -2393,38 +2398,47 @@ async def _run_claude_analyses_background(
                 return None
 
         if ANTHROPIC_API_KEY:
-            logger.info(f"Background: starting 4 Claude calls (ticker={ticker})")
+            logger.info(f"Background: starting Claude calls (ticker={ticker})")
 
-            qa_coro = _generate_qa_with_claude(transcript, prior_transcripts, base_analysis)
-            rewrites_coro = _generate_rewrites_with_claude(flagged_for_rewrite)
-            analysis_coro = _generate_analysis_with_claude(
+            # Build the task list dynamically so we can mark "no work to do"
+            # services as "skipped" instead of running them and getting None,
+            # which the tracker would misinterpret as a failure.
+            tasks = []
+            task_names = []
+
+            tasks.append(_track("qa", _generate_qa_with_claude(transcript, prior_transcripts, base_analysis)))
+            task_names.append("qa")
+
+            if flagged_for_rewrite:
+                tasks.append(_track("rewrites", _generate_rewrites_with_claude(flagged_for_rewrite)))
+                task_names.append("rewrites")
+            else:
+                logger.info("Skipping rewrites: no flagged sentences in transcript")
+                session["progress"]["rewrites"] = "skipped"
+
+            tasks.append(_track("analysis", _generate_analysis_with_claude(
                 transcript,
                 advanced.get("negative_interpretations", []),
                 advanced.get("litigation_risk", {}).get("findings", []),
                 advanced.get("activist_triggers", {}).get("triggers", []),
-            )
-            bull_bear_coro = (
-                _generate_bull_bear_with_claude(transcript, ticker.strip().upper())
-                if ticker and ticker.strip()
-                else None
-            )
+            )))
+            task_names.append("analysis")
 
-            # Run in parallel. Each _track coroutine updates its own progress key
-            # independently, so the frontend sees checkmarks as they land.
-            tasks = [
-                _track("qa", qa_coro),
-                _track("rewrites", rewrites_coro),
-                _track("analysis", analysis_coro),
-            ]
-            if bull_bear_coro is not None:
-                tasks.append(_track("bull_bear", bull_bear_coro))
+            if ticker and ticker.strip():
+                tasks.append(_track("bull_bear", _generate_bull_bear_with_claude(transcript, ticker.strip().upper())))
+                task_names.append("bull_bear")
+            # else: bull_bear was already initialized to "skipped" at session-create time
 
             results = await asyncio.gather(*tasks)
-            claude_qa = results[0]
-            claude_rewrites = results[1]
-            claude_analysis = results[2]
-            if bull_bear_coro is not None:
-                claude_bull_bear = results[3]
+            for name, result in zip(task_names, results):
+                if name == "qa":
+                    claude_qa = result
+                elif name == "rewrites":
+                    claude_rewrites = result
+                elif name == "analysis":
+                    claude_analysis = result
+                elif name == "bull_bear":
+                    claude_bull_bear = result
         else:
             logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
