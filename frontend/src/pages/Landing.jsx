@@ -246,14 +246,6 @@ export default function Landing() {
               },
               {
                 delay: '500ms',
-                iconBg: 'bg-success/10',
-                iconColor: 'text-success',
-                iconPath: 'M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941',
-                title: 'Stock Impact Prediction',
-                desc: 'See projected price reaction before and after suggested edits',
-              },
-              {
-                delay: '550ms',
                 iconBg: 'bg-warning/10',
                 iconColor: 'text-warning',
                 iconPath: 'M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z',
@@ -295,7 +287,7 @@ export default function Landing() {
               {
                 icon: <IconAnalysis />,
                 title: '8-Dimension Analysis',
-                desc: 'Scoring, risk scans, AI rewrites, stock prediction, Q&A prep, and more.',
+                desc: 'Scoring, risk scans, AI rewrites, bull/bear defense, Q&A prep, and more.',
               },
               {
                 icon: <IconExport />,
@@ -358,12 +350,6 @@ export default function Landing() {
                 title: 'Word & PDF Exports',
                 desc: 'Redline Word docs and color-coded PDF reports for your team.',
                 source: 'Industry-Standard Formats',
-              },
-              {
-                icon: <IconAnalysis />,
-                title: 'Stock Impact Prediction',
-                desc: 'Projected price reaction based on historical language patterns.',
-                source: 'Academic Research',
               },
               {
                 icon: <IconQA />,
