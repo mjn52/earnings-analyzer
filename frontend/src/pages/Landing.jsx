@@ -170,7 +170,7 @@ export default function Landing() {
             className="animate-fade-up mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-text-muted md:text-xl"
             style={{ animationDelay: '100ms' }}
           >
-            Run your earnings call draft through 8 institutional-grade analyses — before a single analyst listens.
+            Run your earnings call draft through 6 institutional-grade analyses — before a single analyst listens. Download redline Word docs and color-coded PDFs for your team.
           </p>
 
           <div
@@ -192,9 +192,9 @@ export default function Landing() {
           </div>
         </div>
 
-        {/* Capability highlights — 4x2 grid */}
+        {/* Capability highlights — 3x2 grid */}
         <div className="mx-auto mt-16 max-w-5xl">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[
               {
                 delay: '200ms',
@@ -238,14 +238,6 @@ export default function Landing() {
               },
               {
                 delay: '450ms',
-                iconBg: 'bg-success/10',
-                iconColor: 'text-success',
-                iconPath: 'M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z',
-                title: 'Word & PDF Exports',
-                desc: 'Download redline Word docs and color-coded PDFs for your team',
-              },
-              {
-                delay: '500ms',
                 iconBg: 'bg-warning/10',
                 iconColor: 'text-warning',
                 iconPath: 'M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z',
@@ -286,7 +278,7 @@ export default function Landing() {
               },
               {
                 icon: <IconAnalysis />,
-                title: '8-Dimension Analysis',
+                title: '6-Dimension Analysis',
                 desc: 'Scoring, risk scans, AI rewrites, bull/bear defense, Q&A prep, and more.',
               },
               {
@@ -310,10 +302,10 @@ export default function Landing() {
         <div className="mx-auto max-w-5xl">
           <h2 className="text-center font-sora text-3xl font-bold text-text-main">What It Analyzes</h2>
           <p className="mx-auto mt-3 max-w-xl text-center text-text-muted">
-            Eight research-backed analyses, each calibrated against institutional standards.
+            Six research-backed analyses, each calibrated against institutional standards. Download redline Word docs and color-coded PDFs for your team.
           </p>
 
-          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {[
               {
                 icon: <IconSentiment />,
@@ -344,12 +336,6 @@ export default function Landing() {
                 title: 'AI-Powered Rewrites',
                 desc: 'Context-aware edit suggestions for every flagged sentence.',
                 source: 'LLMs',
-              },
-              {
-                icon: <IconExport />,
-                title: 'Word & PDF Exports',
-                desc: 'Redline Word docs and color-coded PDF reports for your team.',
-                source: 'Industry-Standard Formats',
               },
               {
                 icon: <IconQA />,
