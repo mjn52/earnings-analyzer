@@ -589,6 +589,10 @@ function AnalysisProgress({ progress }) {
         {PROGRESS_ORDER.map((key) => {
           const state = items[key] || 'pending'
           const time = timings[key]
+          // Hide skipped rows — showing "(skipped)" for things that don't apply
+          // (no flagged sentences, no ticker provided) would be misleading,
+          // since the doc still includes rewrites from the other Claude calls.
+          if (state === 'skipped') return null
           return (
             <li key={key} className="flex items-center gap-3 text-sm">
               <ProgressIcon state={state} />
@@ -600,8 +604,6 @@ function AnalysisProgress({ progress }) {
                     ? 'text-danger'
                     : state === 'running'
                     ? 'text-text-main'
-                    : state === 'skipped'
-                    ? 'text-text-muted/60'
                     : 'text-text-muted'
                 }
               >
@@ -611,7 +613,6 @@ function AnalysisProgress({ progress }) {
                 <span className="font-mono text-xs text-text-muted">{(time / 1000).toFixed(1)}s</span>
               )}
               {state === 'failed' && <span className="text-xs text-danger">failed</span>}
-              {state === 'skipped' && <span className="text-xs text-text-muted/60">(skipped)</span>}
             </li>
           )
         })}
