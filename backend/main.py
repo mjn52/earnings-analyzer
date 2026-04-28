@@ -382,7 +382,17 @@ CRITICAL: For each validated trigger, you MUST provide a "suggested_rewrite" —
 
 Emit your analysis by calling the `emit_analysis` tool with all four fields (negative_interpretations, guidance_metrics, litigation_findings, activist_triggers). Every string field must contain ONLY the value itself — do not append parenthetical clarifications like '(in context: ...)' to string values; if context is needed, put it in the appropriate separate field.
 
-REWRITE UNIQUENESS: Each suggested_rewrite text must be distinct from every other suggested_rewrite in the response. When two adjacent original sentences make essentially the same point (e.g. "This is not a churn story." followed by "This is a timing-of-expansion story."), do NOT skip flagging them — instead, write a DIFFERENT, sentence-specific rewrite for each one. Each rewrite should preserve and address the unique angle of its original sentence. Both flags are valuable; just make sure the two suggested_rewrites are different sentences."""
+REWRITE UNIQUENESS: Each suggested_rewrite text must be distinct from every other suggested_rewrite in the response. When two adjacent original sentences make essentially the same point (e.g. "This is not a churn story." followed by "This is a timing-of-expansion story."), do NOT skip flagging them — instead, write a DIFFERENT, sentence-specific rewrite for each one. Each rewrite should preserve and address the unique angle of its original sentence. Both flags are valuable; just make sure the two suggested_rewrites are different sentences.
+
+SELF-REVIEW BEFORE EMITTING: Before calling the emit_analysis tool, mentally walk through every suggested_rewrite you've drafted and verify ALL of the following:
+
+  (a) The rewrite addresses the SPECIFIC topic of its original_text, not a generic theme. Example: if the original is about Free Cash Flow, the rewrite must remain centered on FCF — not get hijacked by an Operating-Cash-Flow narrative just because they're related metrics.
+  (b) The rewrite preserves any specific numbers, names, products, segments, or quarters from the original. Don't replace "Q1 Free Cash Flow of $6.2 billion" with a rewrite about Operating Cash Flow.
+  (c) Each rewrite is distinct from every other rewrite in the response — different words, different framing, not just trivial paraphrase.
+  (d) The rewrite is consistent with information elsewhere in the script. Don't propose a rewrite that contradicts a number or commitment stated earlier.
+  (e) The rewrite actually mitigates the specific flagged issue (e.g., a defensiveness flag should produce a less-defensive rewrite, not just a different wording of the same defensive point).
+
+If any rewrite fails any of these checks, fix it or drop the entry before calling the tool. It is much better to emit fewer high-quality findings than many flawed ones."""
 
 
 # Tool schema — forces Claude to return structured JSON that can't be malformed.
@@ -733,6 +743,252 @@ async def _generate_bull_bear_with_claude(
     except Exception as e:
         logger.error(f"Claude bull/bear generation failed: {type(e).__name__}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# QC pass — reviews all rewrites in context of the full script and decides
+# keep / drop / revise for each. Runs after the parallel analysis +
+# bull/bear calls complete.
+# ---------------------------------------------------------------------------
+
+_QC_SYSTEM_PROMPT = """You are a senior IR editor performing a final quality review of proposed sentence-level rewrites for an earnings call script.
+
+You will be given:
+  1. The full earnings call script (or a substantial excerpt)
+  2. A numbered list of proposed rewrites, each with:
+     - source (which analysis flagged it)
+     - original_text (verbatim from the script)
+     - suggested_rewrite (the proposed replacement)
+     - annotation (what concern this addresses)
+
+For EACH proposed rewrite, decide one of three actions:
+
+KEEP — the rewrite is contextually appropriate, distinct from other rewrites, preserves the original's specific topic, doesn't contradict the rest of the script, and actually mitigates the flagged concern.
+
+DROP — the rewrite is flawed and shouldn't be applied. Reasons to drop include:
+  - It addresses a different topic than the original (e.g. original about FCF, rewrite about OCF)
+  - It's a near-duplicate of another rewrite already in the list
+  - It contradicts a number, name, or claim stated elsewhere in the script
+  - It doesn't actually address the flagged concern
+  - It strips meaningful specificity from the original (numbers, product names, segments)
+  - It introduces speculation, projection, or claims not grounded in the script
+
+REVISE — the rewrite is on the right track but has a fixable issue. Provide revised_text. Use this sparingly; only when KEEP is too lenient and DROP loses something valuable.
+
+You may NOT change the original_text. You may only KEEP, DROP, or REVISE the suggested_rewrite.
+
+Return your review by calling the `emit_qc_review` tool. Every input rewrite must have exactly one corresponding entry in the decisions array, in the same order, with the matching id."""
+
+
+_QC_TOOL = {
+    "name": "emit_qc_review",
+    "description": "Emit your keep/drop/revise decision for each proposed rewrite. Call exactly once with one decision per input rewrite.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "The id of the input rewrite this decision applies to."},
+                        "decision": {"type": "string", "enum": ["keep", "drop", "revise"]},
+                        "reason": {"type": "string", "description": "Brief reason for the decision (1 sentence)."},
+                        "revised_text": {"type": "string", "description": "If decision is 'revise', the new suggested_rewrite text. Empty string otherwise."},
+                    },
+                    "required": ["id", "decision", "reason"],
+                },
+            },
+        },
+        "required": ["decisions"],
+    },
+}
+
+
+async def _qc_review_rewrites(
+    transcript: str,
+    rewrites: list,
+) -> Optional[list]:
+    """Send all proposed rewrites to Claude for a final keep/drop/revise pass.
+
+    `rewrites` is a list of dicts shaped like:
+      {"id": int, "source": str, "original_text": str, "suggested_rewrite": str, "annotation": str}
+
+    Returns a list of decisions (same length as input, same order) or None if
+    the call fails. Callers should fall through to the un-reviewed rewrites
+    on None.
+    """
+    if not ANTHROPIC_API_KEY or not rewrites:
+        return None
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        parts = ["EARNINGS CALL SCRIPT:", "=" * 60]
+        script_words = transcript.split()
+        if len(script_words) > 8000:
+            parts.append(" ".join(script_words[:8000]))
+            parts.append(f"[...truncated from {len(script_words)} words]")
+        else:
+            parts.append(transcript)
+        parts.append("=" * 60)
+        parts.append("")
+        parts.append("PROPOSED REWRITES TO REVIEW:")
+        parts.append("=" * 60)
+        for rw in rewrites:
+            parts.append(f"[{rw['id']}] source={rw['source']}, annotation={rw['annotation']}")
+            parts.append(f"    ORIGINAL:  {rw['original_text']}")
+            parts.append(f"    PROPOSED:  {rw['suggested_rewrite']}")
+            parts.append("")
+        parts.append("=" * 60)
+        parts.append(f"\nReturn a decision for each of the {len(rewrites)} rewrites by calling emit_qc_review.")
+
+        logger.info(f"QC review: sending {len(rewrites)} rewrites to Claude")
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=8000,
+            system=_QC_SYSTEM_PROMPT,
+            tools=[_QC_TOOL],
+            tool_choice={"type": "tool", "name": "emit_qc_review"},
+            messages=[{"role": "user", "content": "\n".join(parts)}],
+        )
+
+        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
+        if tool_use is None:
+            logger.error(f"QC review: no tool_use block (stop_reason={response.stop_reason})")
+            return None
+
+        decisions = tool_use.input.get("decisions", [])
+        if not isinstance(decisions, list):
+            logger.error(f"QC review: decisions is {type(decisions).__name__}, expected list")
+            return None
+
+        # Filter to dicts with the keys we need
+        clean = [d for d in decisions if isinstance(d, dict) and "id" in d and "decision" in d]
+        kept = sum(1 for d in clean if d["decision"] == "keep")
+        dropped = sum(1 for d in clean if d["decision"] == "drop")
+        revised = sum(1 for d in clean if d["decision"] == "revise")
+        logger.info(
+            f"QC review: {kept} kept, {dropped} dropped, {revised} revised "
+            f"(of {len(rewrites)} input)"
+        )
+        return clean
+
+    except Exception as e:
+        logger.error(f"QC review failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _apply_qc_decisions(
+    claude_analysis: Optional[dict],
+    claude_bull_bear: Optional[dict],
+    decisions: list,
+    rewrites_with_ids: list,
+) -> tuple:
+    """Apply keep/drop/revise decisions back to the source dicts.
+
+    Returns updated (claude_analysis, claude_bull_bear) with dropped entries
+    removed and revised suggested_rewrites updated.
+    """
+    # Build id -> decision lookup
+    by_id = {d["id"]: d for d in decisions if isinstance(d, dict) and "id" in d}
+
+    # Track which (source, original_text) pairs to drop and which to revise.
+    # We use the (source, original_text) tuple as the key because that uniquely
+    # identifies a rewrite in the source dicts.
+    drop_keys = set()
+    revise_map = {}  # (source, original_text) -> revised_text
+
+    for rw in rewrites_with_ids:
+        decision_obj = by_id.get(rw["id"])
+        if decision_obj is None:
+            continue
+        decision = decision_obj.get("decision", "keep")
+        if decision == "drop":
+            drop_keys.add((rw["source"], rw["original_text"]))
+        elif decision == "revise":
+            revised_text = (decision_obj.get("revised_text") or "").strip()
+            if revised_text:
+                revise_map[(rw["source"], rw["original_text"])] = revised_text
+
+    def _filter_list(items, source):
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            orig = item.get("original_text", "")
+            key = (source, orig)
+            if key in drop_keys:
+                continue
+            if key in revise_map:
+                item = {**item, "suggested_rewrite": revise_map[key]}
+            out.append(item)
+        return out
+
+    if claude_analysis:
+        claude_analysis = {
+            **claude_analysis,
+            "negative_interpretations": _filter_list(claude_analysis.get("negative_interpretations", []), "neg_interp"),
+            "litigation_findings": _filter_list(claude_analysis.get("litigation_findings", []), "litigation"),
+            "activist_triggers": _filter_list(claude_analysis.get("activist_triggers", []), "activist"),
+        }
+    if claude_bull_bear:
+        claude_bull_bear = {
+            **claude_bull_bear,
+            "rewrites": _filter_list(claude_bull_bear.get("rewrites", []), "bull_bear"),
+        }
+
+    return claude_analysis, claude_bull_bear
+
+
+def _collect_rewrites_for_qc(claude_analysis: Optional[dict], claude_bull_bear: Optional[dict]) -> list:
+    """Flatten all proposed rewrites into a single list with stable ids for QC review."""
+    out = []
+    next_id = 0
+
+    def _add(items, source, annotation_fn):
+        nonlocal next_id
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            orig = (item.get("original_text") or "").strip()
+            rw = (item.get("suggested_rewrite") or "").strip()
+            if not orig or not rw or rw == orig:
+                continue
+            out.append({
+                "id": next_id,
+                "source": source,
+                "original_text": orig,
+                "suggested_rewrite": rw,
+                "annotation": annotation_fn(item),
+            })
+            next_id += 1
+
+    if claude_analysis:
+        _add(
+            claude_analysis.get("negative_interpretations", []),
+            "neg_interp",
+            lambda i: f"Neg Interp: {i.get('category', 'unknown')} [{i.get('severity', 'medium')}]",
+        )
+        _add(
+            claude_analysis.get("litigation_findings", []),
+            "litigation",
+            lambda i: f"Litigation: {i.get('issue', 'unknown')} [{i.get('severity', 'medium')}]",
+        )
+        _add(
+            claude_analysis.get("activist_triggers", []),
+            "activist",
+            lambda i: f"Activist: {i.get('category', 'unknown')} [{i.get('severity', 'medium')}]",
+        )
+    if claude_bull_bear:
+        _add(
+            claude_bull_bear.get("rewrites", []),
+            "bull_bear",
+            lambda i: f"Bull/Bear: {i.get('case_type', 'bear')} — {(i.get('case_thesis') or '')[:60]}",
+        )
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2515,6 +2771,35 @@ async def _run_claude_analyses_background(
                     claude_analysis = result
                 elif name == "bull_bear":
                     claude_bull_bear = result
+
+            # ----- Quality review: send all proposed rewrites back to Claude
+            # for a final keep / drop / revise pass against the full script.
+            # Catches contextually-wrong rewrites (e.g. FCF sentence rewritten
+            # with OCF-anchored language), near-duplicates that fuzzy dedup
+            # missed, and rewrites that don't actually mitigate their flag.
+            rewrites_for_qc = _collect_rewrites_for_qc(claude_analysis, claude_bull_bear)
+            if rewrites_for_qc:
+                qc_t0 = time.monotonic()
+                session["progress"]["qc_review"] = "running"
+                try:
+                    decisions = await _qc_review_rewrites(transcript, rewrites_for_qc)
+                    qc_elapsed_ms = int((time.monotonic() - qc_t0) * 1000)
+                    session["timings"]["qc_review"] = qc_elapsed_ms
+                    if decisions is not None:
+                        claude_analysis, claude_bull_bear = _apply_qc_decisions(
+                            claude_analysis, claude_bull_bear, decisions, rewrites_for_qc
+                        )
+                        session["progress"]["qc_review"] = "complete"
+                    else:
+                        # QC call itself failed — keep original rewrites, mark failed
+                        session["progress"]["qc_review"] = "failed"
+                except Exception as e:
+                    qc_elapsed_ms = int((time.monotonic() - qc_t0) * 1000)
+                    session["timings"]["qc_review"] = qc_elapsed_ms
+                    logger.error(f"QC review failed: {type(e).__name__}: {e}")
+                    session["progress"]["qc_review"] = "failed"
+            else:
+                session["progress"]["qc_review"] = "skipped"
         else:
             logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
@@ -2609,6 +2894,7 @@ async def analyze_start(
             "rewrites": "pending" if ANTHROPIC_API_KEY else "skipped",
             "analysis": "pending" if ANTHROPIC_API_KEY else "skipped",
             "bull_bear": "pending" if (ANTHROPIC_API_KEY and _has_ticker) else "skipped",
+            "qc_review": "pending" if ANTHROPIC_API_KEY else "skipped",
         },
         "timings": {},
         "claude_qa": None,

@@ -566,9 +566,10 @@ const PROGRESS_LABELS = {
   rewrites: 'Sentence rewrites',
   analysis: 'Risk analysis',
   bull_bear: 'Bull / Bear cases',
+  qc_review: 'Quality review',
 }
 
-const PROGRESS_ORDER = ['qa', 'rewrites', 'analysis', 'bull_bear']
+const PROGRESS_ORDER = ['qa', 'rewrites', 'analysis', 'bull_bear', 'qc_review']
 
 function AnalysisProgress({ progress }) {
   const items = progress?.progress || {}
