@@ -236,23 +236,32 @@ def _dedupe_by_rewrite(items: list, label: str) -> list:
     """Drop entries whose suggested_rewrite is similar to one already seen.
 
     First occurrence wins. Logs each drop with the original text so the
-    pattern is visible in Railway logs.
+    pattern is visible in Railway logs. Also logs every comparison at debug
+    level so we can diagnose missed duplicates.
     """
     kept_norms: list = []
     out: list = []
-    for item in items:
+    logger.info(f"Dedup [{label}]: examining {len(items)} candidate rewrites")
+    for i, item in enumerate(items):
         if not isinstance(item, dict):
             continue
-        norm = _normalize_rewrite_for_dedup(item.get("suggested_rewrite", ""))
+        rewrite_text = item.get("suggested_rewrite", "") or ""
+        norm = _normalize_rewrite_for_dedup(rewrite_text)
         match = _is_duplicate_rewrite(norm, kept_norms) if norm else None
         if match is not None:
             logger.info(
-                f"Dropping duplicate {label} rewrite for "
-                f"original={item.get('original_text', '')[:60]!r} "
-                f"(similar to one already kept)"
+                f"Dedup [{label}]: DROP item {i} "
+                f"orig={item.get('original_text', '')[:60]!r} "
+                f"rewrite={rewrite_text[:80]!r}"
             )
             continue
         if norm:
+            # Log a fingerprint so we can diff what's getting through
+            logger.info(
+                f"Dedup [{label}]: KEEP item {i} "
+                f"orig={item.get('original_text', '')[:60]!r} "
+                f"norm_len={len(norm)} norm_head={norm[:60]!r}"
+            )
             kept_norms.append(norm)
         out.append(item)
     return out
@@ -2772,34 +2781,14 @@ async def _run_claude_analyses_background(
                 elif name == "bull_bear":
                     claude_bull_bear = result
 
-            # ----- Quality review: send all proposed rewrites back to Claude
-            # for a final keep / drop / revise pass against the full script.
-            # Catches contextually-wrong rewrites (e.g. FCF sentence rewritten
-            # with OCF-anchored language), near-duplicates that fuzzy dedup
-            # missed, and rewrites that don't actually mitigate their flag.
-            rewrites_for_qc = _collect_rewrites_for_qc(claude_analysis, claude_bull_bear)
-            if rewrites_for_qc:
-                qc_t0 = time.monotonic()
-                session["progress"]["qc_review"] = "running"
-                try:
-                    decisions = await _qc_review_rewrites(transcript, rewrites_for_qc)
-                    qc_elapsed_ms = int((time.monotonic() - qc_t0) * 1000)
-                    session["timings"]["qc_review"] = qc_elapsed_ms
-                    if decisions is not None:
-                        claude_analysis, claude_bull_bear = _apply_qc_decisions(
-                            claude_analysis, claude_bull_bear, decisions, rewrites_for_qc
-                        )
-                        session["progress"]["qc_review"] = "complete"
-                    else:
-                        # QC call itself failed — keep original rewrites, mark failed
-                        session["progress"]["qc_review"] = "failed"
-                except Exception as e:
-                    qc_elapsed_ms = int((time.monotonic() - qc_t0) * 1000)
-                    session["timings"]["qc_review"] = qc_elapsed_ms
-                    logger.error(f"QC review failed: {type(e).__name__}: {e}")
-                    session["progress"]["qc_review"] = "failed"
-            else:
-                session["progress"]["qc_review"] = "skipped"
+            # QC review pass disabled for now. The implementation
+            # (_qc_review_rewrites + _apply_qc_decisions) is preserved above
+            # for future use, but in initial testing it dropped 100% of
+            # bull/bear rewrites because those are intentionally
+            # narrative-shifting and fail "preserve original topic" checks
+            # by design. Re-enable after splitting QC criteria per source
+            # (lenient for bull/bear, strict for analysis findings).
+            session["progress"]["qc_review"] = "skipped"
         else:
             logger.info("No ANTHROPIC_API_KEY — using fallback Q&A and rewrites")
 
@@ -2894,7 +2883,7 @@ async def analyze_start(
             "rewrites": "pending" if ANTHROPIC_API_KEY else "skipped",
             "analysis": "pending" if ANTHROPIC_API_KEY else "skipped",
             "bull_bear": "pending" if (ANTHROPIC_API_KEY and _has_ticker) else "skipped",
-            "qc_review": "pending" if ANTHROPIC_API_KEY else "skipped",
+            "qc_review": "skipped",  # disabled — see background task for context
         },
         "timings": {},
         "claude_qa": None,
