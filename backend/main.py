@@ -315,7 +315,7 @@ CRITICAL: For each validated trigger, you MUST provide a "suggested_rewrite" —
 
 Emit your analysis by calling the `emit_analysis` tool with all four fields (negative_interpretations, guidance_metrics, litigation_findings, activist_triggers). Every string field must contain ONLY the value itself — do not append parenthetical clarifications like '(in context: ...)' to string values; if context is needed, put it in the appropriate separate field.
 
-UNIQUENESS RULE: Each suggested_rewrite across the entire response must be unique. If two original sentences would benefit from the same replacement (e.g. two adjacent sentences making the same defensive point), include only ONE entry covering the more representative original — do not emit two entries with identical suggested_rewrite text. Repeating the same rewrite for two different originals produces duplicated tracked changes in the Word document, which looks broken to the user."""
+REWRITE UNIQUENESS: Each suggested_rewrite text must be distinct from every other suggested_rewrite in the response. When two adjacent original sentences make essentially the same point (e.g. "This is not a churn story." followed by "This is a timing-of-expansion story."), do NOT skip flagging them — instead, write a DIFFERENT, sentence-specific rewrite for each one. Each rewrite should preserve and address the unique angle of its original sentence. Both flags are valuable; just make sure the two suggested_rewrites are different sentences."""
 
 
 # Tool schema — forces Claude to return structured JSON that can't be malformed.
