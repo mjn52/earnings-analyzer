@@ -191,6 +191,44 @@ Return your rewrites in this EXACT numbered format — one rewrite per line:
 CRITICAL: Include ALL indices from the input. Every sentence MUST appear. Do NOT add any explanations, commentary, or extra text — ONLY the numbered rewrites."""
 
 
+def _normalize_rewrite_for_dedup(s: Optional[str]) -> str:
+    """Normalize a rewrite string for duplicate detection.
+
+    Compare on lowercased, whitespace-collapsed, punctuation-stripped text so
+    trivial variations Claude might emit (trailing period, double space,
+    capitalization) don't bypass a strict-equality check.
+    """
+    if not s:
+        return ""
+    # Strip ASCII punctuation (cheap; covers .,;:!?"' and friends)
+    cleaned = "".join(ch for ch in s.lower() if ch.isalnum() or ch.isspace())
+    return " ".join(cleaned.split())
+
+
+def _dedupe_by_rewrite(items: list, label: str) -> list:
+    """Drop entries whose suggested_rewrite normalizes to one already seen.
+
+    First occurrence wins. Logs each drop with the original text so the
+    pattern is visible in Railway logs.
+    """
+    seen: set = set()
+    out: list = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        norm = _normalize_rewrite_for_dedup(item.get("suggested_rewrite", ""))
+        if norm and norm in seen:
+            logger.info(
+                f"Dropping duplicate {label} rewrite for "
+                f"original={item.get('original_text', '')[:60]!r}"
+            )
+            continue
+        if norm:
+            seen.add(norm)
+        out.append(item)
+    return out
+
+
 async def _generate_rewrites_with_claude(flagged_sentences: list) -> Optional[dict]:
     """
     Send all flagged sentences to Claude in one batch for context-aware rewriting.
@@ -473,24 +511,9 @@ async def _generate_analysis_with_claude(
         # is not a churn story." and "This is a timing-of-expansion story."
         # both becoming the same neutral statement). Showing the same
         # replacement twice in the doc looks broken; keep only the first.
-        def _dedupe_by_rewrite(items, label):
-            seen = set()
-            out = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                rw = (item.get("suggested_rewrite") or "").strip()
-                if rw and rw in seen:
-                    logger.info(
-                        f"Dropping duplicate {label} rewrite for "
-                        f"original={item.get('original_text', '')[:60]!r}"
-                    )
-                    continue
-                if rw:
-                    seen.add(rw)
-                out.append(item)
-            return out
-
+        # Compare on normalized text (lowercase, collapsed whitespace, no
+        # punctuation) so trivial variations Claude introduces to evade a
+        # strict-equality check still get caught.
         neg_interps = _dedupe_by_rewrite(neg_interps, "neg_interp")
         lit_findings = _dedupe_by_rewrite(lit_findings, "litigation")
         activist = _dedupe_by_rewrite(activist, "activist")
@@ -1598,6 +1621,29 @@ def _export_word_improved(
         if rewrite and rewrite != sent:
             _passage_rewrites[' '.join(sent.split())] = rewrite
 
+    # Track normalized rewrite text → first original it was applied to. If a
+    # later (orig, rewrite) pair has a rewrite that normalizes to one already
+    # applied, skip it so the doc doesn't show the same replacement twice.
+    # This catches duplicates that survive earlier source-level dedup (e.g.
+    # because Claude introduced a trailing-period or whitespace variation).
+    _used_rewrite_norms: dict = {}  # normalized_rewrite → first_orig
+
+    def _rewrite_already_used(rewrite: str, orig: str) -> bool:
+        """Return True if this rewrite text has already been applied to a
+        DIFFERENT original. Logs the skip so it's visible in Railway logs."""
+        norm = _normalize_rewrite_for_dedup(rewrite)
+        if not norm:
+            return False
+        prior = _used_rewrite_norms.get(norm)
+        if prior and prior != orig:
+            logger.info(
+                f"Export: dropping duplicate rewrite for {orig[:60]!r} "
+                f"(already applied to {prior[:60]!r})"
+            )
+            return True
+        _used_rewrite_norms[norm] = orig
+        return False
+
     # Also add any claude_rewrites that aren't from flagged_passages
     # (these come from classify_sentence()-flagged sentences added at analyze time)
     _extra_from_claude = 0
@@ -1605,8 +1651,15 @@ def _export_word_improved(
         for sent, rewrite in claude_rewrites.items():
             norm_key = ' '.join(sent.split())
             if norm_key not in _passage_rewrites and rewrite and rewrite != sent:
+                if _rewrite_already_used(rewrite, sent):
+                    continue
                 _passage_rewrites[norm_key] = rewrite
                 _extra_from_claude += 1
+
+    # Seed _used_rewrite_norms with rewrites already added from flagged_passages
+    # so subsequent sources don't duplicate them
+    for _orig_norm, _rw in _passage_rewrites.items():
+        _used_rewrite_norms.setdefault(_normalize_rewrite_for_dedup(_rw), _orig_norm)
 
     # Merge negative-interpretation / litigation / activist rewrites into
     # the same pipeline so they all render as inline track changes.
@@ -1626,6 +1679,8 @@ def _export_word_improved(
             orig = ni.get("original_text", "")
             rewrite = ni.get("suggested_rewrite", "")
             if orig and rewrite and rewrite != orig:
+                if _rewrite_already_used(rewrite, orig):
+                    continue
                 norm_key = ' '.join(orig.split())
                 # Only add if not already covered by flagged_passages / claude_rewrites
                 if norm_key not in _passage_rewrites:
@@ -1642,6 +1697,8 @@ def _export_word_improved(
             orig = f.get("original_text", "")
             rewrite = f.get("suggested_rewrite", "")
             if orig and rewrite and rewrite != orig:
+                if _rewrite_already_used(rewrite, orig):
+                    continue
                 norm_key = ' '.join(orig.split())
                 _passage_rewrites[norm_key] = rewrite
                 severity = f.get("severity", "medium").upper()
@@ -1656,6 +1713,8 @@ def _export_word_improved(
             orig = t.get("original_text", "")
             rewrite = t.get("suggested_rewrite", "")
             if orig and rewrite and rewrite != orig:
+                if _rewrite_already_used(rewrite, orig):
+                    continue
                 norm_key = ' '.join(orig.split())
                 # Don't overwrite a litigation rewrite (higher priority)
                 if norm_key not in _passage_rewrites:
