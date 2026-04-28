@@ -682,6 +682,10 @@ async def _generate_bull_bear_with_claude(
         bull_cases = _only_dicts(data.get("bull_cases", []), "bull_cases")
         bear_cases = _only_dicts(data.get("bear_cases", []), "bear_cases")
         rewrites = _only_dicts(data.get("rewrites", []), "rewrites")
+        # Drop bull/bear rewrites that share text with another rewrite — same
+        # symptom we hit on the analysis call: model emits one good rewrite
+        # then reuses it for an adjacent original.
+        rewrites = _dedupe_by_rewrite(rewrites, "bull_bear")
 
         logger.info(
             f"Claude bull/bear for {ticker}: {len(bull_cases)} bull cases, "
@@ -759,6 +763,23 @@ def _build_flagged_issues(
     """
     issues = []
     seen_sentences = set()  # Track sentences already flagged (for dedup with bull/bear)
+    # Track normalized rewrite text → first original it was applied to.
+    # Prevents the API/frontend from showing the same suggested_rewrite
+    # against two different originals (the bug that surfaced when Claude
+    # emitted converging rewrites for adjacent sentences).
+    used_rewrite_norms: dict = {}
+
+    def _claim_rewrite(rewrite: str, orig: str) -> bool:
+        """Reserve a rewrite for `orig`. Returns False if another original
+        already claimed an equivalent rewrite (and we should drop this one)."""
+        norm = _normalize_rewrite_for_dedup(rewrite)
+        if not norm:
+            return True
+        prior = used_rewrite_norms.get(norm)
+        if prior and prior != orig:
+            return False
+        used_rewrite_norms[norm] = orig
+        return True
 
     for fp in base_analysis.get("flagged_passages", []):
         sentence = fp["sentence"]
@@ -772,13 +793,16 @@ def _build_flagged_issues(
         if not rewrite or rewrite == sentence:
             rewrite = _generate_rewrite_fallback(sentence, fp["issues"])
 
-        # Only include rewrite if it's actually different
+        # Only include rewrite if it's actually different AND not a duplicate of one already used
+        if rewrite and rewrite != sentence and not _claim_rewrite(rewrite, sentence):
+            rewrite = None
+
         issues.append(
             {
                 "sentence": sentence,
                 "color": color,
                 "issues": fp["issues"],
-                "suggested_rewrite": rewrite if rewrite != sentence else None,
+                "suggested_rewrite": rewrite if rewrite and rewrite != sentence else None,
             }
         )
 
@@ -794,6 +818,15 @@ def _build_flagged_issues(
             rationale = rw.get("rationale", "")
 
             if not orig or not rewrite or rewrite == orig:
+                continue
+
+            # Drop bull/bear rewrites that duplicate one already applied to a
+            # different original sentence (the FCF/OCF cross-application bug)
+            if not _claim_rewrite(rewrite, orig):
+                logger.info(
+                    f"Flagged issues: dropping duplicate bull/bear rewrite "
+                    f"for {orig[:60]!r}"
+                )
                 continue
 
             norm_key = ' '.join(orig.split())
@@ -1740,6 +1773,8 @@ def _export_word_improved(
             orig = rw.get("original_text", "")
             rewrite = rw.get("suggested_rewrite", "")
             if orig and rewrite and rewrite != orig:
+                if _rewrite_already_used(rewrite, orig):
+                    continue
                 norm_key = ' '.join(orig.split())
                 # Note if we're overwriting an existing rewrite
                 existing_annotation = _rewrite_annotations.get(norm_key)
