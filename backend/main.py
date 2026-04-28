@@ -205,26 +205,55 @@ def _normalize_rewrite_for_dedup(s: Optional[str]) -> str:
     return " ".join(cleaned.split())
 
 
+_DEDUP_SIMILARITY_THRESHOLD = 0.85
+
+
+def _is_duplicate_rewrite(candidate_norm: str, prior_norms: list) -> Optional[str]:
+    """Return the matching prior_norm if `candidate_norm` is a near-duplicate
+    of any prior, else None. Catches paraphrased variants that exact-equality
+    misses (e.g. Claude swapping a couple of words to satisfy a uniqueness
+    instruction while keeping the rewrite essentially the same)."""
+    if not candidate_norm:
+        return None
+    for prior in prior_norms:
+        if not prior:
+            continue
+        if prior == candidate_norm:
+            return prior
+        # Cheap length filter: if lengths differ by >30%, treat as different
+        max_len = max(len(prior), len(candidate_norm))
+        if max_len == 0:
+            continue
+        if abs(len(prior) - len(candidate_norm)) / max_len > 0.3:
+            continue
+        ratio = difflib.SequenceMatcher(None, prior, candidate_norm).ratio()
+        if ratio >= _DEDUP_SIMILARITY_THRESHOLD:
+            return prior
+    return None
+
+
 def _dedupe_by_rewrite(items: list, label: str) -> list:
-    """Drop entries whose suggested_rewrite normalizes to one already seen.
+    """Drop entries whose suggested_rewrite is similar to one already seen.
 
     First occurrence wins. Logs each drop with the original text so the
     pattern is visible in Railway logs.
     """
-    seen: set = set()
+    kept_norms: list = []
     out: list = []
     for item in items:
         if not isinstance(item, dict):
             continue
         norm = _normalize_rewrite_for_dedup(item.get("suggested_rewrite", ""))
-        if norm and norm in seen:
+        match = _is_duplicate_rewrite(norm, kept_norms) if norm else None
+        if match is not None:
             logger.info(
                 f"Dropping duplicate {label} rewrite for "
-                f"original={item.get('original_text', '')[:60]!r}"
+                f"original={item.get('original_text', '')[:60]!r} "
+                f"(similar to one already kept)"
             )
             continue
         if norm:
-            seen.add(norm)
+            kept_norms.append(norm)
         out.append(item)
     return out
 
