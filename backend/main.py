@@ -313,7 +313,9 @@ You will be given a list of pattern-matched activist vulnerability triggers. For
 - Provide a defense suggestion specific to the actual concern
 CRITICAL: For each validated trigger, you MUST provide a "suggested_rewrite" — a revised version of the original_text that defuses the activist concern while preserving the intended business message. This rewrite will appear as tracked changes in the Word document.
 
-Emit your analysis by calling the `emit_analysis` tool with all four fields (negative_interpretations, guidance_metrics, litigation_findings, activist_triggers). Every string field must contain ONLY the value itself — do not append parenthetical clarifications like '(in context: ...)' to string values; if context is needed, put it in the appropriate separate field."""
+Emit your analysis by calling the `emit_analysis` tool with all four fields (negative_interpretations, guidance_metrics, litigation_findings, activist_triggers). Every string field must contain ONLY the value itself — do not append parenthetical clarifications like '(in context: ...)' to string values; if context is needed, put it in the appropriate separate field.
+
+UNIQUENESS RULE: Each suggested_rewrite across the entire response must be unique. If two original sentences would benefit from the same replacement (e.g. two adjacent sentences making the same defensive point), include only ONE entry covering the more representative original — do not emit two entries with identical suggested_rewrite text. Repeating the same rewrite for two different originals produces duplicated tracked changes in the Word document, which looks broken to the user."""
 
 
 # Tool schema — forces Claude to return structured JSON that can't be malformed.
@@ -465,6 +467,33 @@ async def _generate_analysis_with_claude(
         guidance = data.get("guidance_metrics", [])
         lit_findings = data.get("litigation_findings", [])
         activist = data.get("activist_triggers", [])
+
+        # Deduplicate by suggested_rewrite — Claude sometimes returns the same
+        # rewrite for two adjacent sentences making the same point (e.g. "This
+        # is not a churn story." and "This is a timing-of-expansion story."
+        # both becoming the same neutral statement). Showing the same
+        # replacement twice in the doc looks broken; keep only the first.
+        def _dedupe_by_rewrite(items, label):
+            seen = set()
+            out = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rw = (item.get("suggested_rewrite") or "").strip()
+                if rw and rw in seen:
+                    logger.info(
+                        f"Dropping duplicate {label} rewrite for "
+                        f"original={item.get('original_text', '')[:60]!r}"
+                    )
+                    continue
+                if rw:
+                    seen.add(rw)
+                out.append(item)
+            return out
+
+        neg_interps = _dedupe_by_rewrite(neg_interps, "neg_interp")
+        lit_findings = _dedupe_by_rewrite(lit_findings, "litigation")
+        activist = _dedupe_by_rewrite(activist, "activist")
 
         logger.info(
             f"Claude analysis: {len(neg_interps)} neg interps, "
