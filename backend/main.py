@@ -535,12 +535,25 @@ async def _generate_analysis_with_claude(
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=6000,
+            # This call forces the heaviest structured output of all four Claude
+            # calls — four arrays (negative interps, guidance, litigation,
+            # activist), each item carrying up to six text fields. At 6000 the
+            # forced tool call truncated on content-rich transcripts, came back
+            # as a partial/unparseable tool_use block, and the whole Risk
+            # analysis silently fell back to templates. Match the other heavy
+            # calls (rewrites uses 16000).
+            max_tokens=16000,
             system=_ANALYSIS_SYSTEM_PROMPT,
             tools=[_ANALYSIS_TOOL],
             tool_choice={"type": "tool", "name": "emit_analysis"},
             messages=[{"role": "user", "content": "\n".join(parts)}],
         )
+
+        if response.stop_reason == "max_tokens":
+            logger.warning(
+                "Claude analysis hit max_tokens ceiling — output truncated, "
+                "tool_use may be partial. Raise max_tokens if this recurs."
+            )
 
         tool_use = next((block for block in response.content if block.type == "tool_use"), None)
         if tool_use is None:
